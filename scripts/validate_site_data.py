@@ -10,6 +10,9 @@ def main() -> None:
     path = Path(sys.argv[1] if len(sys.argv) > 1 else "web/data/strategy.json")
     data = json.loads(path.read_text(encoding="utf-8"))
     assert data["players"], "No players in generated data"
+    live_filter = data["meta"].get("liveFilter", {})
+    assert live_filter.get("timezone"), "Live-filter timezone is missing"
+    assert live_filter.get("seasonRotation", {}).get("anchorUtc"), "Season anchor is missing"
     assert data["rankings"]["team"]["views"]["All|All"], "Team ranking is empty"
     assert len(data["rankings"]["team"]["views"]["All|All"]) <= data["meta"]["topN"]
     for player in data["players"]:
