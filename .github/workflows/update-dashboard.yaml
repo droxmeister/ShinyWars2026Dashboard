@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Every 15 minutes, deliberately away from the top of the hour.
-    - cron: "7,22,37,52 * * * *"
+    - cron: "7,17,28,37,47,57 * * * *"
   push:
     branches: [main]
     paths:
