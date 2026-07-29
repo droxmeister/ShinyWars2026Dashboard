@@ -49,10 +49,11 @@ class DashboardTests(unittest.TestCase):
             self.config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
+        expected_top_n = int(self.config["top_n"])
         self.assertEqual(payload["meta"]["activeSeason"], "Summer")
         self.assertEqual(payload["players"], ["Alpha", "Beta"])
-        self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]), 25)
-        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Summer|All"]), 25)
+        self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]),expected_top_n,)
+        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Summer|All"]),expected_top_n,)
 
     def test_player_catch_excludes_contexts_containing_that_family(self):
         normalized = NormalizedInput(
