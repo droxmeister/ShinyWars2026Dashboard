@@ -10,7 +10,7 @@
 <body>
   <header class="hero">
     <div>
-      <p class="eyebrow">TEAM Phase to Face · SHINY WARS 2026</p>
+      <p class="eyebrow">TEAM PHASE TO FACE · SHINY WARS 2026</p>
       <h1>Horde Strategy Dashboard</h1>
       <p class="subtitle">Live team and player-specific Top 50 spots, recalculated from the shared catch checklist.</p>
     </div>
@@ -19,6 +19,14 @@
 
   <main>
     <section class="controls card" aria-label="Dashboard filters">
+      <div class="filter-mode-control">
+        <span class="control-label">Filter mode</span>
+        <button id="liveFilterToggle" class="live-filter-button" type="button" aria-pressed="true">
+          <span class="live-dot" aria-hidden="true"></span>
+          <span id="liveFilterButtonText">Live filters: ON</span>
+        </button>
+        <small id="liveFilterHint">Detecting current season and time…</small>
+      </div>
       <label>
         View
         <select id="viewerSelect"></select>
@@ -49,7 +57,9 @@
     </section>
 
     <section class="metrics" aria-label="Current strategy summary">
-      <article class="metric card"><span>Active season</span><strong id="activeSeason">—</strong></article>
+      <article class="metric card"><span>Current season</span><strong id="activeSeason">—</strong></article>
+      <article class="metric card"><span>In-game time</span><strong id="gameTime">—</strong></article>
+      <article class="metric card"><span>Current window</span><strong id="activeTimeWindow">—</strong></article>
       <article class="metric card"><span>Team families caught</span><strong id="caughtFamilies">—</strong></article>
       <article class="metric card"><span>Selected view</span><strong id="selectedView">—</strong></article>
       <article class="metric card"><span>Last update</span><strong id="lastUpdate">—</strong></article>
@@ -88,6 +98,7 @@
       <h2>Scoring model</h2>
       <p><strong>Adjusted contribution</strong> = Sweet Scent horde probability × horde size × current event points × temporal exclusivity.</p>
       <p>Temporal exclusivity is <strong>12 ÷ the number of season/time combinations</strong> in which the encountered species is available.</p>
+      <p>With live filtering enabled, the dashboard automatically uses the current event season and PokeMMO time window. Disable it to use the manual Season and Time selectors.</p>
       <p>For player views, a route context is excluded when that player has already caught any scoring evolution family available in the context. This rule is configurable in <code>config/dashboard_config.json</code>.</p>
       <p>All calculations use <code>location_id</code> as the authoritative map key. The route or location name is shown for readability; repeated names include their Location ID.</p>
     </section>
@@ -102,6 +113,7 @@
     <div class="target-details"></div>
   </template>
 
+  <script src="live-time.js" defer></script>
   <script src="app.js" defer></script>
 </body>
 </html>
