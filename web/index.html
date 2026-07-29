@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Live PokeMMO Shiny Wars 2026 horde strategy dashboard">
+  <title>Shiny Wars 2026 — Horde Strategy</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="hero">
+    <div>
+      <p class="eyebrow">TEAM UXIE · SHINY WARS 2026</p>
+      <h1>Horde Strategy Dashboard</h1>
+      <p class="subtitle">Live team and player-specific Top 25 spots, recalculated from the shared catch checklist.</p>
+    </div>
+    <div id="statusBadge" class="status-badge">Loading strategy…</div>
+  </header>
+
+  <main>
+    <section class="controls card" aria-label="Dashboard filters">
+      <label>
+        View
+        <select id="viewerSelect"></select>
+      </label>
+      <label>
+        Season
+        <select id="seasonSelect">
+          <option value="All">All seasons</option>
+          <option value="Summer">Summer</option>
+          <option value="Autumn">Autumn</option>
+          <option value="Winter">Winter</option>
+          <option value="Spring">Spring</option>
+        </select>
+      </label>
+      <label>
+        Time
+        <select id="timeSelect">
+          <option value="All">All times</option>
+          <option value="morning">Morning</option>
+          <option value="day">Day</option>
+          <option value="night">Night</option>
+        </select>
+      </label>
+      <label class="search-label">
+        Search spots or targets
+        <input id="searchInput" type="search" placeholder="e.g. Route 229 or Volbeat">
+      </label>
+    </section>
+
+    <section class="metrics" aria-label="Current strategy summary">
+      <article class="metric card"><span>Active season</span><strong id="activeSeason">—</strong></article>
+      <article class="metric card"><span>Team families caught</span><strong id="caughtFamilies">—</strong></article>
+      <article class="metric card"><span>Selected view</span><strong id="selectedView">—</strong></article>
+      <article class="metric card"><span>Last update</span><strong id="lastUpdate">—</strong></article>
+    </section>
+
+    <section class="card explanation">
+      <div>
+        <h2 id="rankingTitle">Top 25 spots</h2>
+        <p id="rankingExplanation"></p>
+      </div>
+      <button id="methodButton" class="secondary-button" type="button">How scoring works</button>
+    </section>
+
+    <section class="card table-card">
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Spot</th>
+              <th>Window</th>
+              <th>Adjusted score</th>
+              <th>Top target</th>
+              <th>Horde chance</th>
+              <th>Fallback</th>
+              <th>Targets</th>
+            </tr>
+          </thead>
+          <tbody id="rankingBody"></tbody>
+        </table>
+      </div>
+      <div id="emptyState" class="empty-state" hidden>No matching spots found.</div>
+    </section>
+
+    <section id="methodPanel" class="card method-panel" hidden>
+      <h2>Scoring model</h2>
+      <p><strong>Adjusted contribution</strong> = Sweet Scent horde probability × horde size × current event points × temporal exclusivity.</p>
+      <p>Temporal exclusivity is <strong>12 ÷ the number of season/time combinations</strong> in which the encountered species is available.</p>
+      <p>For player views, a route context is excluded when that player has already caught any scoring evolution family available in the context. This rule is configurable in <code>config/dashboard_config.json</code>.</p>
+      <p>All calculations use <code>location_id</code> as the authoritative map key. The route or location name is shown for readability; repeated names include their Location ID.</p>
+    </section>
+  </main>
+
+  <footer>
+    <span>Generated automatically by GitHub Actions.</span>
+    <span id="footerMeta"></span>
+  </footer>
+
+  <template id="targetDetailsTemplate">
+    <div class="target-details"></div>
+  </template>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
