@@ -9,8 +9,10 @@ from pathlib import Path
 from src.build_dashboard import (
     NormalizedInput,
     build_payload,
+    active_season,
     build_static_model,
     context_family_sets,
+    current_game_clock,
     rank_for_state,
     resolve_catch_families,
 )
@@ -49,11 +51,45 @@ class DashboardTests(unittest.TestCase):
             self.config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
-        expected_top_n = int(self.config["top_n"])
-        self.assertEqual(payload["meta"]["activeSeason"], "Summer")
+        self.assertEqual(payload["meta"]["activeSeason"], "Winter")
         self.assertEqual(payload["players"], ["Alpha", "Beta"])
-        self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]),expected_top_n,)
-        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Summer|All"]),expected_top_n,)
+        expected_top_n = int(self.config["top_n"])
+        self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]), expected_top_n)
+        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Winter|All"]), expected_top_n)
+        self.assertIn("liveFilter", payload["meta"])
+        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Winter")
+
+    def test_weekly_season_rotation_uses_configured_local_anchor(self):
+        self.assertEqual(
+            active_season(self.config, datetime(2026, 7, 29, 19, 45, tzinfo=timezone.utc)),
+            "Autumn",
+        )
+        self.assertEqual(
+            active_season(self.config, datetime(2026, 7, 31, 22, 1, tzinfo=timezone.utc)),
+            "Winter",
+        )
+        self.assertEqual(
+            active_season(self.config, datetime(2026, 8, 7, 22, 1, tzinfo=timezone.utc)),
+            "Spring",
+        )
+
+    def test_game_clock_and_time_windows(self):
+        self.assertEqual(
+            current_game_clock(self.config, datetime(2026, 7, 29, 0, 0, tzinfo=timezone.utc)),
+            ("00:00", "night"),
+        )
+        self.assertEqual(
+            current_game_clock(self.config, datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc)),
+            ("04:00", "morning"),
+        )
+        self.assertEqual(
+            current_game_clock(self.config, datetime(2026, 7, 29, 2, 45, tzinfo=timezone.utc)),
+            ("11:00", "day"),
+        )
+        self.assertEqual(
+            current_game_clock(self.config, datetime(2026, 7, 29, 5, 15, tzinfo=timezone.utc)),
+            ("21:00", "night"),
+        )
 
     def test_player_catch_excludes_contexts_containing_that_family(self):
         normalized = NormalizedInput(
