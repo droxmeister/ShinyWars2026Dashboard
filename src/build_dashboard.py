@@ -8,6 +8,8 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from math import floor
+from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -106,13 +108,108 @@ def normalize_input(raw: SheetInput) -> NormalizedInput:
     )
 
 
-def active_season(schedule: list[dict[str, Any]], now: datetime) -> str:
-    for entry in schedule:
+def _parse_clock_minute(value: str) -> int:
+    hour_text, minute_text = str(value).split(":", 1)
+    hour = int(hour_text)
+    minute = int(minute_text)
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        raise ValueError(f"Invalid clock time: {value!r}")
+    return hour * 60 + minute
+
+
+def _classify_game_time(game_minute: int, windows: dict[str, Any]) -> str:
+    for key in ("morning", "day", "night"):
+        entry = windows.get(key, {})
+        start = _parse_clock_minute(str(entry.get("start", "00:00")))
+        end = _parse_clock_minute(str(entry.get("end", "23:59")))
+        if start <= end:
+            matches = start <= game_minute <= end
+        else:
+            matches = game_minute >= start or game_minute <= end
+        if matches:
+            return key
+    raise ValueError(f"No time window contains game minute {game_minute}")
+
+
+def current_game_clock(config: dict[str, Any], now: datetime) -> tuple[str, str]:
+    live = config.get("live_filter", {})
+    timezone_name = str(live.get("timezone", "Europe/Berlin"))
+    game = live.get("game_clock", {})
+    anchors = sorted(int(value) for value in game.get("day_start_hours_local", [2, 8, 14, 20]))
+    seconds_per_game_minute = int(game.get("real_seconds_per_game_minute", 15))
+    if not anchors or seconds_per_game_minute <= 0:
+        raise ValueError("live_filter.game_clock is invalid")
+
+    local_now = now.astimezone(ZoneInfo(timezone_name))
+    local_seconds = local_now.hour * 3600 + local_now.minute * 60 + local_now.second
+    anchor_seconds = [hour * 3600 for hour in anchors]
+    previous = [value for value in anchor_seconds if value <= local_seconds]
+    active_anchor = previous[-1] if previous else anchor_seconds[-1] - 24 * 3600
+    elapsed_real_seconds = local_seconds - active_anchor
+    game_minute = int(elapsed_real_seconds // seconds_per_game_minute) % (24 * 60)
+    game_time = f"{game_minute // 60:02d}:{game_minute % 60:02d}"
+    windows = game.get(
+        "time_windows",
+        {
+            "morning": {"start": "04:00", "end": "10:59"},
+            "day": {"start": "11:00", "end": "20:59"},
+            "night": {"start": "21:00", "end": "03:59"},
+        },
+    )
+    return game_time, _classify_game_time(game_minute, windows)
+
+
+def _rotation_anchor_utc(config: dict[str, Any]) -> datetime:
+    live = config.get("live_filter", {})
+    timezone_name = str(live.get("timezone", "Europe/Berlin"))
+    rotation = live.get("season_rotation", {})
+    anchor = datetime.fromisoformat(str(rotation["anchor_local"]))
+    if anchor.tzinfo is None:
+        anchor = anchor.replace(tzinfo=ZoneInfo(timezone_name))
+    return anchor.astimezone(timezone.utc)
+
+
+def active_season(config: dict[str, Any], now: datetime) -> str:
+    live = config.get("live_filter", {})
+    rotation = live.get("season_rotation")
+    if rotation:
+        order = [str(value) for value in rotation.get("season_order", [])]
+        anchor_season = str(rotation.get("anchor_season", ""))
+        interval_days = float(rotation.get("interval_days", 7))
+        if not order or anchor_season not in order or interval_days <= 0:
+            raise ValueError("live_filter.season_rotation is invalid")
+        anchor = _rotation_anchor_utc(config)
+        steps = floor((now.astimezone(timezone.utc) - anchor).total_seconds() / (interval_days * 86400))
+        anchor_index = order.index(anchor_season)
+        return order[(anchor_index + steps) % len(order)]
+
+    for entry in config.get("event_schedule", []):
         start = datetime.fromisoformat(str(entry["start_utc"]).replace("Z", "+00:00"))
         end = datetime.fromisoformat(str(entry["end_utc"]).replace("Z", "+00:00"))
         if start <= now < end:
             return str(entry["season"])
     return "All"
+
+
+def live_filter_payload(config: dict[str, Any]) -> dict[str, Any]:
+    live = config.get("live_filter", {})
+    game = live.get("game_clock", {})
+    rotation = live.get("season_rotation", {})
+    anchor_utc = _rotation_anchor_utc(config) if rotation else None
+    return {
+        "defaultEnabled": bool(live.get("default_enabled", True)),
+        "timezone": str(live.get("timezone", "Europe/Berlin")),
+        "gameDayStartHoursLocal": [int(value) for value in game.get("day_start_hours_local", [2, 8, 14, 20])],
+        "realSecondsPerGameMinute": int(game.get("real_seconds_per_game_minute", 15)),
+        "timeWindows": game.get("time_windows", {}),
+        "seasonRotation": {
+            "anchorUtc": anchor_utc.isoformat().replace("+00:00", "Z") if anchor_utc else None,
+            "anchorLocal": rotation.get("anchor_local"),
+            "anchorSeason": rotation.get("anchor_season"),
+            "seasonOrder": rotation.get("season_order", []),
+            "intervalDays": float(rotation.get("interval_days", 7)),
+        },
+    }
 
 
 def build_static_model(monsters_path: Path, tiers_path: Path):
@@ -363,7 +460,8 @@ def build_payload(
         "players": {},
     }
     player_summaries: list[dict[str, Any]] = []
-    active = active_season(config.get("event_schedule", []), generated_at)
+    active = active_season(config, generated_at)
+    game_time_at_build, active_time_of_day = current_game_clock(config, generated_at)
 
     for player in normalized.players:
         player_rankings, player_targets, excluded_count = rank_for_state(
@@ -378,7 +476,7 @@ def build_payload(
         )
         views = build_views(player_rankings, player_targets, top_n)
         rankings["players"][player] = views
-        default_key = f"{active}|All" if active != "All" else "All|All"
+        default_key = f"{active}|{active_time_of_day}" if active != "All" else f"All|{active_time_of_day}"
         default_ids = views["views"].get(default_key, [])
         top = views["entries"].get(default_ids[0]) if default_ids else None
         player_summaries.append(
@@ -400,6 +498,9 @@ def build_payload(
         "meta": {
             "generatedAtUtc": generated_at.isoformat(),
             "activeSeason": active,
+            "activeTimeOfDay": active_time_of_day,
+            "gameTimeAtBuild": game_time_at_build,
+            "liveFilter": live_filter_payload(config),
             "topN": top_n,
             "playerCount": len(normalized.players),
             "teamCaughtFamilyCount": len(team_families),
@@ -426,6 +527,8 @@ def build_payload(
         ["Key", "Value"],
         ["Last successful update (UTC)", generated_at.isoformat()],
         ["Active event season", active],
+        ["Active in-game time window", active_time_of_day],
+        ["In-game time at build", game_time_at_build],
         ["Active players", len(normalized.players)],
         ["Team caught evolution families", len(team_families)],
         ["Ranked route contexts", model["diagnostics"]["context_count"]],
@@ -466,7 +569,8 @@ def build_payload(
 
 def _top_team_display(payload: dict[str, Any]) -> str:
     season = payload["meta"]["activeSeason"]
-    key = f"{season}|All" if season != "All" else "All|All"
+    time_of_day = payload["meta"].get("activeTimeOfDay", "All")
+    key = f"{season}|{time_of_day}" if season != "All" else f"All|{time_of_day}"
     team = payload["rankings"]["team"]
     ids = team["views"].get(key, [])
     return team["entries"].get(ids[0], {}).get("displayName", "") if ids else ""
