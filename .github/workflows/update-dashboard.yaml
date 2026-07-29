@@ -1,10 +1,11 @@
 name: Update Shiny Wars dashboard
 
 on:
-  workflow_dispatch:
   schedule:
     # Every 10 minutes, deliberately away from the top of the hour.
-    - cron: "7,17,27,37,47,57 * * * *"
+    - cron: "7-59/10 * * * *"
+  workflow_dispatch:
+  
   push:
     branches: [main]
     paths:
