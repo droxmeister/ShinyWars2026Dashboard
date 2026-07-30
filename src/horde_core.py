@@ -19,8 +19,14 @@ Key rules implemented:
 The legacy score index is proportional to expected event points per Sweet Scent use:
     sum(horde_probability * horde_size * score_if_shiny)
 
-The recommended temporal-exclusivity index additionally multiplies each
-encountered species by 12 / its number of available season-time combinations.
+The recommended temporal-exclusivity index keeps the raw exclusivity measure
+``12 / available season-time combinations`` for transparency, but uses a
+deliberately capped scoring bonus:
+
+- exclusivity 12 -> legacy contribution x2
+- exclusivity 6 or 4 -> legacy contribution x1.5
+- all other exclusivity values -> legacy contribution unchanged
+
 The common per-check shiny probability is deliberately omitted because it is
 identical across normal wild horde routes and does not affect route ordering.
 
@@ -55,9 +61,18 @@ STANDARD_HORDE_POOL_PERCENT = 5.0
 DEFAULT_UNIQUE_BONUS = 8.0
 DEFAULT_DUPLICATE_POINTS = 1.0
 TOTAL_TEMPORAL_COMBINATIONS = len(SEASONS) * len(TIMES)
-DEFAULT_EXCLUSIVITY_POWER = 1.0
 OFFICIAL_RULES_URL = "https://forums.pokemmo.com/index.php?/topic/198507-pokemmo-shiny-wars-2026/"
 RULES_MIRROR_URL = "https://pokemmo.shoutwiki.com/wiki/Event:Shiny_Wars_2026"
+
+
+def temporal_exclusivity_score_multiplier(exclusivity: float) -> float:
+    """Return the capped score multiplier for a temporal exclusivity value."""
+    value = float(exclusivity)
+    if math.isclose(value, 12.0, abs_tol=1e-9):
+        return 2.0
+    if math.isclose(value, 6.0, abs_tol=1e-9) or math.isclose(value, 4.0, abs_tol=1e-9):
+        return 1.5
+    return 1.0
 
 
 @dataclass(frozen=True)
@@ -524,7 +539,6 @@ def aggregate_context_targets(
     records: list[dict[str, Any]],
     state: ScoringState,
     use_temporal_exclusivity: bool = False,
-    exclusivity_power: float = DEFAULT_EXCLUSIVITY_POWER,
 ) -> list[dict[str, Any]]:
     family_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for record in records:
@@ -544,15 +558,29 @@ def aggregate_context_targets(
             for record in family_records
         )
         legacy_contribution = check_weight * effective_score
+        raw_exclusivity_weighted_contribution = sum(
+            float(record["horde_roll_probability"])
+            * float(record["horde_size"])
+            * effective_score
+            * float(record["species_temporal_exclusivity"])
+            for record in family_records
+        )
         exclusivity_contribution = sum(
             float(record["horde_roll_probability"])
             * float(record["horde_size"])
             * effective_score
-            * (float(record["species_temporal_exclusivity"]) ** exclusivity_power)
+            * temporal_exclusivity_score_multiplier(
+                float(record["species_temporal_exclusivity"])
+            )
             for record in family_records
         )
         average_exclusivity = (
-            exclusivity_contribution / legacy_contribution if legacy_contribution else 1.0
+            raw_exclusivity_weighted_contribution / legacy_contribution
+            if legacy_contribution else 1.0
+        )
+        average_score_multiplier = (
+            exclusivity_contribution / legacy_contribution
+            if legacy_contribution else 1.0
         )
         ranking_contribution = (
             exclusivity_contribution if use_temporal_exclusivity else legacy_contribution
@@ -562,6 +590,9 @@ def aggregate_context_targets(
                 str(record["pokemon"]),
                 int(record["species_temporal_combination_count"]),
                 float(record["species_temporal_exclusivity"]),
+                temporal_exclusivity_score_multiplier(
+                    float(record["species_temporal_exclusivity"])
+                ),
             )
             for record in family_records
         })
@@ -592,11 +623,18 @@ def aggregate_context_targets(
             "species_temporal_exclusivity_average": format_number(average_exclusivity, 6),
             "species_temporal_exclusivity_min": format_number(min(item[2] for item in species_details)),
             "species_temporal_exclusivity_max": format_number(max(item[2] for item in species_details)),
+            "species_temporal_score_multiplier_average": format_number(average_score_multiplier, 6),
+            "species_temporal_score_multiplier_min": format_number(min(item[3] for item in species_details)),
+            "species_temporal_score_multiplier_max": format_number(max(item[3] for item in species_details)),
             "species_temporal_combination_count_min": min(item[1] for item in species_details),
             "species_temporal_combination_count_max": max(item[1] for item in species_details),
             "species_temporal_exclusivity_details": " | ".join(
-                f"{species}: {count}/12 combos, x{format_number(multiplier, 4)}"
-                for species, count, multiplier in species_details
+                (
+                    f"{species}: {count}/12 combos, "
+                    f"exclusivity x{format_number(exclusivity, 4)}, "
+                    f"score x{format_number(score_multiplier, 2)}"
+                )
+                for species, count, exclusivity, score_multiplier in species_details
             ),
             "score_index_contribution": format_number(legacy_contribution),
             "exclusivity_adjusted_score_index_contribution": format_number(exclusivity_contribution, 6),
@@ -622,15 +660,12 @@ def rank_contexts(
     by_context: dict[str, list[dict[str, Any]]],
     state: ScoringState,
     use_temporal_exclusivity: bool = False,
-    exclusivity_power: float = DEFAULT_EXCLUSIVITY_POWER,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     ranking_rows: list[dict[str, Any]] = []
     all_target_rows: list[dict[str, Any]] = []
 
     for context_id, records in by_context.items():
-        targets = aggregate_context_targets(
-            records, state, use_temporal_exclusivity, exclusivity_power
-        )
+        targets = aggregate_context_targets(records, state, use_temporal_exclusivity)
         if not targets:
             continue
         all_target_rows.extend(targets)
@@ -648,7 +683,9 @@ def rank_contexts(
             float(record["horde_roll_probability"])
             * float(record["horde_size"])
             * float(record["base_points"])
-            * (float(record["species_temporal_exclusivity"]) ** exclusivity_power)
+            * temporal_exclusivity_score_multiplier(
+                float(record["species_temporal_exclusivity"])
+            )
             for record in records
         )
         state_score_index = sum(float(target["score_index_contribution"]) for target in targets)
@@ -718,6 +755,7 @@ def rank_contexts(
             "top_target_family": primary["scoring_family"],
             "top_target_points": primary["effective_points_if_shiny"],
             "top_target_temporal_exclusivity": primary["species_temporal_exclusivity_average"],
+            "top_target_score_multiplier": primary["species_temporal_score_multiplier_average"],
             "top_target_temporal_combinations": primary["species_temporal_combination_count_min"],
             "top_target_horde_probability_percent": primary["horde_roll_probability_percent"],
             "top_target_shiny_check_share_percent": primary["shiny_check_share_percent"],
@@ -725,6 +763,7 @@ def rank_contexts(
             "fallback_target_family": fallback["scoring_family"] if fallback else "",
             "fallback_target_points": fallback["effective_points_if_shiny"] if fallback else "",
             "fallback_target_temporal_exclusivity": fallback["species_temporal_exclusivity_average"] if fallback else "",
+            "fallback_target_score_multiplier": fallback["species_temporal_score_multiplier_average"] if fallback else "",
             "fallback_horde_probability_percent": fallback["horde_roll_probability_percent"] if fallback else "",
             "third_target": third["encountered_species"] if third else "",
             "third_target_family": third["scoring_family"] if third else "",
@@ -818,7 +857,6 @@ def greedy_unique_strategy(
     initial_state: ScoringState,
     max_steps: int,
     use_temporal_exclusivity: bool = False,
-    exclusivity_power: float = DEFAULT_EXCLUSIVITY_POWER,
 ) -> list[dict[str, Any]]:
     """Build a fast greedy route ladder for collecting new scoring families.
 
@@ -833,9 +871,7 @@ def greedy_unique_strategy(
 
     precomputed: dict[str, list[dict[str, Any]]] = {}
     for context_id, records in by_context.items():
-        targets = aggregate_context_targets(
-            records, initial_state, use_temporal_exclusivity, exclusivity_power
-        )
+        targets = aggregate_context_targets(records, initial_state, use_temporal_exclusivity)
         new_targets = [target for target in targets if target["score_status"] == "new_team_unique"]
         if new_targets:
             precomputed[context_id] = new_targets
@@ -887,6 +923,7 @@ def greedy_unique_strategy(
             "points_on_first_team_catch": target["effective_points_if_shiny"],
             "target_temporal_combination_count": target["species_temporal_combination_count_min"],
             "target_temporal_exclusivity": target["species_temporal_exclusivity_average"],
+            "target_temporal_score_multiplier": target["species_temporal_score_multiplier_average"],
             "target_horde_probability_percent": target["horde_roll_probability_percent"],
             "target_shiny_check_share_percent": target["shiny_check_share_percent"],
             "target_legacy_score_index_contribution": target["score_index_contribution"],
@@ -899,7 +936,7 @@ def greedy_unique_strategy(
             ),
             "context_id": context_id,
             "strategy_note": (
-                "Greedy unique-family acquisition heuristic with temporal exclusivity; rerun after actual team catches."
+                "Greedy unique-family acquisition heuristic with capped temporal-exclusivity score bonuses; rerun after actual team catches."
                 if use_temporal_exclusivity
                 else "Legacy greedy unique-family acquisition heuristic without temporal exclusivity; rerun after actual team catches."
             ),
@@ -1022,7 +1059,7 @@ def rule_source_rows() -> list[dict[str, Any]]:
         },
         {
             "rule": "Temporal exclusivity strategy weight",
-            "value": "Species exclusivity = 12 / distinct season-time combinations; adjusted score multiplies each species contribution by this factor",
+            "value": "Species exclusivity = 12 / distinct season-time combinations; score multiplier is x2 at exclusivity 12, x1.5 at exclusivity 6 or 4, otherwise x1",
             "source_url": "User-provided strategy requirement",
         },
     ]
@@ -1112,7 +1149,13 @@ Recommended temporal-exclusivity strategy:
 
 `Temporal exclusivity = 1 ÷ availability quotient = 12 ÷ distinct combinations`
 
-`Adjusted score index = Σ(legacy target contribution × species temporal exclusivity)`
+`Adjusted score index = Σ(legacy target contribution × capped exclusivity score multiplier)`
+
+The score multiplier is:
+
+- exclusivity `12` (one combination) → `×2`
+- exclusivity `6` or `4` (two or three combinations) → `×1.5`
+- all other exclusivity values → `×1`
 
 This index is proportional to expected Shiny Wars points per Sweet Scent activation. The common per-check shiny probability is omitted because it does not change the ordering of normal wild horde routes.
 
@@ -1211,14 +1254,12 @@ def main() -> None:
     parser.add_argument("--unique-bonus", type=float, default=None)
     parser.add_argument("--duplicate-points", type=float, default=None)
     parser.add_argument("--strategy-steps", type=int, default=None)
-    parser.add_argument("--exclusivity-power", type=float, default=None, help="Exponent applied to the temporal exclusivity multiplier; default 1.0")
     args = parser.parse_args()
 
     config = read_config(args.config)
     unique_bonus = args.unique_bonus if args.unique_bonus is not None else float(config.get("unique_species_bonus", DEFAULT_UNIQUE_BONUS))
     duplicate_points = args.duplicate_points if args.duplicate_points is not None else float(config.get("duplicate_points", DEFAULT_DUPLICATE_POINTS))
     strategy_steps = args.strategy_steps if args.strategy_steps is not None else int(config.get("strategy_steps", 120))
-    exclusivity_power = args.exclusivity_power if args.exclusivity_power is not None else float(config.get("temporal_exclusivity_weight_power", DEFAULT_EXCLUSIVITY_POWER))
 
     team_names = split_names(args.team_caught) or [str(item) for item in config.get("team_caught_families", [])]
     player_names = split_names(args.player_caught) or [str(item) for item in config.get("player_caught_families", [])]
@@ -1273,22 +1314,22 @@ def main() -> None:
 
     # Legacy outputs: unchanged points/probability strategy, retained as backup.
     context_rankings, target_rankings = rank_contexts(
-        by_context, state, use_temporal_exclusivity=False, exclusivity_power=exclusivity_power
+        by_context, state, use_temporal_exclusivity=False
     )
     route_best = best_context_per_route(context_rankings, per_season=False)
     season_best = best_context_per_route(context_rankings, per_season=True)
     strategy = greedy_unique_strategy(
-        by_context, state, strategy_steps, use_temporal_exclusivity=False, exclusivity_power=exclusivity_power
+        by_context, state, strategy_steps, use_temporal_exclusivity=False
     )
 
-    # Recommended outputs: direct multiplication by 12 / available combinations.
+    # Recommended outputs: capped bonuses derived from 12 / available combinations.
     exclusivity_context_rankings, exclusivity_target_rankings = rank_contexts(
-        by_context, state, use_temporal_exclusivity=True, exclusivity_power=exclusivity_power
+        by_context, state, use_temporal_exclusivity=True
     )
     exclusivity_route_best = best_context_per_route(exclusivity_context_rankings, per_season=False)
     exclusivity_season_best = best_context_per_route(exclusivity_context_rankings, per_season=True)
     exclusivity_strategy = greedy_unique_strategy(
-        by_context, state, strategy_steps, use_temporal_exclusivity=True, exclusivity_power=exclusivity_power
+        by_context, state, strategy_steps, use_temporal_exclusivity=True
     )
 
     output_dir = args.output_dir
@@ -1347,7 +1388,6 @@ def main() -> None:
         "scoring_state": {
             "unique_species_bonus": unique_bonus,
             "duplicate_points": duplicate_points,
-            "temporal_exclusivity_weight_power": exclusivity_power,
             "team_caught_families": sorted(team_families),
             "player_caught_families": sorted(player_families),
             "score_precedence": [
@@ -1367,8 +1407,13 @@ def main() -> None:
             "possible_combinations": TOTAL_TEMPORAL_COMBINATIONS,
             "formula": "12 / distinct season-time combinations for each encountered species",
             "availability_quotient": "distinct season-time combinations / 12",
-            "score_formula": "legacy score contribution * species temporal exclusivity ^ configured power",
-            "configured_power": exclusivity_power,
+            "score_formula": "legacy contribution x2 at exclusivity 12; x1.5 at exclusivity 6 or 4; otherwise unchanged",
+            "score_multipliers": {
+                "12": 2.0,
+                "6": 1.5,
+                "4": 1.5,
+                "default": 1.0,
+            },
             "scoring_level": "encountered species; evolution-family availability is exported for reference",
         },
         "top_route_context": context_rankings[0] if context_rankings else None,
