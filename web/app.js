@@ -14,7 +14,6 @@ const state = {
   sortBy: "adjustedScore",
   sortDirection: "desc",
   bestSpotsOnly: false,
-  bestSpotsPreviousFilters: null,
   visibleCount: PAGE_SIZE,
   clockTimer: null,
 };
@@ -149,6 +148,23 @@ function currentBundle() {
   return state.data.rankings?.players?.[state.viewer] || null;
 }
 
+function topTargetDetails(row) {
+  const targets = Array.isArray(row?.targets)
+    ? row.targets
+    : [];
+
+  return (
+    targets.find((target) => {
+      return target.species === row.topTarget;
+    }) ||
+    targets.find((target) => {
+      return target.family === row.topTargetFamily;
+    }) ||
+    null
+  );
+}
+
+
 function currentViews() {
   const bundle = currentBundle();
 
@@ -156,29 +172,28 @@ function currentViews() {
     return [];
   }
 
-  if (state.bestSpotsOnly) {
-    const season = effectiveSeason();
-    const time = effectiveTime();
-    const bestSpots = Array.isArray(
-      bundle.bestSpots
-    )
-      ? bundle.bestSpots
-      : [];
-
-    return bestSpots.filter((row) => {
-      return (
-        (season === "All" || row.season === season) &&
-        (time === "All" || row.timeOfDay === time)
-      );
-    });
-  }
-
   const key = `${effectiveSeason()}|${effectiveTime()}`;
   const contextIds = bundle.views?.[key] || [];
-
-  return contextIds
+  const rows = contextIds
     .map((contextId) => bundle.entries?.[contextId])
     .filter(Boolean);
+
+  if (!state.bestSpotsOnly) {
+    return rows;
+  }
+
+  /*
+   * Best spots is an additional condition on the normal filtered route view.
+   * A route remains visible only when its displayed top target is marked as
+   * an annual-best Location / Season / Time context for that evolution line.
+   * The complete route row is retained, including fallbacks and every phase.
+   */
+  return rows.filter((row) => {
+    return Boolean(
+      topTargetDetails(row)
+        ?.isBestAnnualFamilyContext
+    );
+  });
 }
 
 function searchableText(row) {
@@ -356,8 +371,8 @@ function ensureBestSpotsToggle() {
   button.type = "button";
   button.setAttribute("aria-pressed", "false");
   button.title = (
-    "Show exactly one annual best Location / Season / " +
-    "Time combination per evolution family"
+    "Show only routes whose current top target is an annual-best " +
+    "Location / Season / Time combination"
   );
   button.textContent = "★ Best spots only";
 
@@ -397,33 +412,9 @@ function setBestSpotsOnly(enabled) {
     return;
   }
 
-  if (nextEnabled) {
-    state.bestSpotsPreviousFilters = {
-      autoFilter: state.autoFilter,
-      manualSeason: state.manualSeason,
-      manualTime: state.manualTime,
-    };
-    state.bestSpotsOnly = true;
-
-    // Start with the complete annual winner list. Manual filters
-    // remain available for narrowing it by season or time.
-    state.autoFilter = false;
-    state.manualSeason = "All";
-    state.manualTime = "All";
-  } else {
-    state.bestSpotsOnly = false;
-
-    const previous =
-      state.bestSpotsPreviousFilters;
-
-    if (previous) {
-      state.autoFilter = previous.autoFilter;
-      state.manualSeason = previous.manualSeason;
-      state.manualTime = previous.manualTime;
-    }
-
-    state.bestSpotsPreviousFilters = null;
-  }
+  // This toggle is deliberately independent from Season, Time and live/manual
+  // filtering. It only adds or removes the annual-best-top-target condition.
+  state.bestSpotsOnly = nextEnabled;
 
   resetVisibleCount();
   updateFilterControls();
@@ -804,9 +795,6 @@ function updateFilterControls() {
 
   els.season.disabled = state.autoFilter;
   els.time.disabled = state.autoFilter;
-  els.liveFilterToggle.disabled =
-    state.bestSpotsOnly;
-
   els.season.value = season;
   els.time.value = time;
 
@@ -830,33 +818,30 @@ function updateFilterControls() {
       ? " (simulated)"
       : "";
 
-  els.liveFilterHint.textContent =
+  const bestSpotsSuffix =
     state.bestSpotsOnly
+      ? " · best spots only"
+      : "";
+
+  els.liveFilterHint.textContent =
+    state.autoFilter
       ? (
-          `Best spots use annual winners. ` +
-          `Manual selection: ${season} · ` +
+          `Automatically using ` +
+          `${state.liveSeason} · ` +
+          `${state.liveTimeLabel}` +
+          simulationSuffix +
+          bestSpotsSuffix
+        )
+      : (
+          `Manual selection: ` +
+          `${season} · ` +
           `${
             time === "All"
               ? "All times"
               : titleCase(time)
-          }`
-        )
-      : state.autoFilter
-        ? (
-            `Automatically using ` +
-            `${state.liveSeason} · ` +
-            `${state.liveTimeLabel}` +
-            simulationSuffix
-          )
-        : (
-            `Manual selection: ` +
-            `${season} · ` +
-            `${
-              time === "All"
-                ? "All times"
-                : titleCase(time)
-            }`
-          );
+          }` +
+          bestSpotsSuffix
+        );
 }
 
 function refreshLiveContext({
@@ -962,18 +947,13 @@ function rankingRowHtml({
    * Falls kein eindeutiger Treffer gefunden wird, verwenden wir
    * wie bisher das erste Target.
    */
-  const topTargetDetails =
-    targets.find((target) => {
-      return (
-        target.species === row.topTarget ||
-        target.family === row.topTargetFamily
-      );
-    }) ||
+  const selectedTopTarget =
+    topTargetDetails(row) ||
     targets[0] ||
     null;
 
   const topStatus =
-    topTargetDetails?.status ||
+    selectedTopTarget?.status ||
     "new_team_unique";
 
   const [
@@ -983,9 +963,9 @@ function rankingRowHtml({
 
   const topCombinationInfo =
     combinationLabelInfo(
-      topTargetDetails
+      selectedTopTarget
         ?.seasonTimeCombinationCount,
-      topTargetDetails
+      selectedTopTarget
         ?.seasonTimeCombinationTotal
     );
 
@@ -1063,7 +1043,7 @@ function rankingRowHtml({
         <span class="target-name">
           ${escapeHtml(row.topTarget)}
           ${bestAnnualTargetMarker(
-            topTargetDetails
+            selectedTopTarget
               ?.isBestAnnualFamilyContext
           )}
         </span>
@@ -1242,7 +1222,7 @@ function render() {
           } — ${selectedName}`
         )
       : (
-          `${allRows.length} annual best ` +
+          `${allRows.length} filtered best ` +
           `spot${
             allRows.length === 1
               ? ""
@@ -1283,12 +1263,12 @@ function render() {
   els.explanation.textContent =
     state.bestSpotsOnly
       ? (
-          `Showing one annual best Location / Season / ` +
-          `Time combination per evolution family for ` +
-          `${filterText}. The score is the selected ` +
-          `family's expected contribution, including ` +
-          `horde split, horde size, event points and ` +
-          `the current S/T multiplier.`
+          `Showing routes in ${filterText} whose top target ` +
+          `is tied for the best annual Location / Season / ` +
+          `Time combination of its evolution family. Existing ` +
+          `Season, Time, live/manual, search and sort filters ` +
+          `remain active. Full route targets and fallbacks are ` +
+          `kept visible.`
         )
       : state.viewer === "team"
         ? (
@@ -1507,10 +1487,6 @@ els.search.addEventListener(
 els.liveFilterToggle.addEventListener(
   "click",
   () => {
-    if (state.bestSpotsOnly) {
-      return;
-    }
-
     state.autoFilter =
       !state.autoFilter;
 
