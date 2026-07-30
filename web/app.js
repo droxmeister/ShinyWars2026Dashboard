@@ -601,14 +601,50 @@ function rankingRowHtml({
     ? row.targets
     : [];
 
+  /*
+   * Das Top Target möglichst über Species oder Familie finden.
+   * Falls kein eindeutiger Treffer gefunden wird, verwenden wir
+   * wie bisher das erste Target.
+   */
+  const topTargetDetails =
+    targets.find((target) => {
+      return (
+        target.species === row.topTarget ||
+        target.family === row.topTargetFamily
+      );
+    }) ||
+    targets[0] ||
+    null;
+
   const topStatus =
-    targets[0]?.status ||
+    topTargetDetails?.status ||
     "new_team_unique";
 
   const [
     topLabel,
     topClass,
   ] = statusLabel(topStatus);
+
+  const topCombinationInfo =
+    combinationLabelInfo(
+      topTargetDetails
+        ?.seasonTimeCombinationCount
+    );
+
+  const topCombinationLabel =
+    topCombinationInfo
+      ? `
+        <div class="target-meta">
+          <span
+            class="pill ${topCombinationInfo.cssClass}"
+          >
+            ${escapeHtml(
+              topCombinationInfo.text
+            )}
+          </span>
+        </div>
+      `
+      : "";
 
   const windowText =
     `${row.season} · ` +
@@ -687,6 +723,8 @@ function rankingRowHtml({
             ${escapeHtml(topLabel)}
           </span>
         </div>
+
+        ${topCombinationLabel}
       </td>
 
       <td>
