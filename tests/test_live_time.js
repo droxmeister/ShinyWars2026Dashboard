@@ -31,12 +31,14 @@ assert.deepEqual(
 
 const rotation = {
   anchorUtc: "2026-07-31T22:01:00Z",
-  anchorSeason: "Winter",
-  seasonOrder: ["Winter", "Spring", "Summer", "Autumn"],
+  anchorSeason: "Summer",
+  beforeAnchorSeason: "Autumn",
+  seasonOrder: ["Summer", "Autumn", "Winter", "Spring"],
   intervalDays: 7,
 };
 assert.equal(seasonAt(new Date("2026-07-29T19:45:00Z"), rotation), "Autumn");
-assert.equal(seasonAt(new Date("2026-07-31T22:01:00Z"), rotation), "Winter");
-assert.equal(seasonAt(new Date("2026-08-07T22:01:00Z"), rotation), "Spring");
+assert.equal(seasonAt(new Date("2026-07-31T22:00:00Z"), rotation), "Autumn");
+assert.equal(seasonAt(new Date("2026-07-31T22:01:00Z"), rotation), "Summer");
+assert.equal(seasonAt(new Date("2026-08-07T22:01:00Z"), rotation), "Autumn");
 
 console.log("live-time tests passed");
