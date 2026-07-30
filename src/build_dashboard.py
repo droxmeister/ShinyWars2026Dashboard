@@ -290,7 +290,7 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
         "scoreMultiplier": float(row["species_temporal_score_multiplier_average"]),
         "adjustedContribution": float(row["ranking_score_index_contribution"]),
         "legacyContribution": float(row["score_index_contribution"]),
-        "seasonTimeCombinationCount": int(row["species_temporal_combination_count"]),
+        "seasonTimeCombinationCount": int(row["species_temporal_combination_count_min"]),
     }
 
 
