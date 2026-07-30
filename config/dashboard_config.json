@@ -1,8 +1,17 @@
 {
   "unique_species_bonus": 8,
   "duplicate_points": 1,
-  "page_size": 100,
   "exclude_player_context_if_any_target_family_caught": true,
+  "fixed_horde_probability_overrides": [
+    {
+      "pokemon": "Zorua",
+      "region_id": 2,
+      "location_id": 385,
+      "encounter_type": "Grass",
+      "probability": 0.05,
+      "reason": "Illusion hides the Pokédex horde probability; assumed 5%"
+    }
+  ],
   "live_filter": {
     "default_enabled": true,
     "timezone": "Europe/Berlin",

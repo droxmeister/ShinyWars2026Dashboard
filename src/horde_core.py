@@ -13,8 +13,11 @@ Key rules implemented:
 - Standard horde rows are stored as a 5% split of the wild encounter table.
   Sweet Scent rolls only between the active horde splits, so each species'
   Sweet Scent probability is raw_split / sum(active_horde_splits).
-- Explicit ``type = Sweet Scent`` early-game tables are retained and normalized
-  the same way. No horde-marked records are excluded.
+- Explicit ``type = Sweet Scent`` tables are retained and normalized to 100%.
+- Configured fixed-probability encounters (for example Zorua with hidden ``???``
+  rarity) reserve their final probability first; the remaining horde pool is
+  normalized proportionally into the leftover probability mass.
+- No horde-marked records are excluded.
 
 The legacy score index is proportional to expected event points per Sweet Scent use:
     sum(horde_probability * horde_size * score_if_shiny)
@@ -274,6 +277,122 @@ def parse_percent(value: Any) -> float:
         return 0.0
 
 
+def _parse_fixed_probability(value: Any) -> float:
+    """Parse a config probability expressed as 0.05 or "5%"."""
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith("%"):
+            probability = float(text[:-1]) / 100.0
+        else:
+            probability = float(text)
+    else:
+        probability = float(value)
+
+    if not math.isfinite(probability) or not (0.0 < probability <= 1.0):
+        raise ValueError(
+            "Fixed horde probability overrides must be greater than 0 and at most 1, "
+            f"got {value!r}"
+        )
+    return probability
+
+
+def _prepare_fixed_horde_probability_overrides(
+    overrides: Sequence[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    prepared: list[dict[str, Any]] = []
+    for index, raw_override in enumerate(overrides or []):
+        if not isinstance(raw_override, dict):
+            raise ValueError(
+                f"fixed_horde_probability_overrides[{index}] must be an object"
+            )
+        if raw_override.get("enabled", True) is False:
+            continue
+
+        missing = [
+            key
+            for key in (
+                "pokemon",
+                "region_id",
+                "location_id",
+                "encounter_type",
+                "probability",
+            )
+            if key not in raw_override
+        ]
+        if missing:
+            raise ValueError(
+                f"fixed_horde_probability_overrides[{index}] is missing: "
+                + ", ".join(missing)
+            )
+
+        prepared.append({
+            "index": index,
+            "pokemon": normalize_name(str(raw_override["pokemon"])).casefold(),
+            "region_id": str(raw_override["region_id"]),
+            "location_id": str(raw_override["location_id"]),
+            "encounter_type": str(raw_override["encounter_type"]).strip().casefold(),
+            "season": (
+                str(raw_override["season"]).strip().casefold()
+                if raw_override.get("season") not in (None, "")
+                else None
+            ),
+            "time_of_day": (
+                str(raw_override["time_of_day"]).strip().casefold()
+                if raw_override.get("time_of_day") not in (None, "")
+                else None
+            ),
+            "form": (
+                str(raw_override["form"])
+                if raw_override.get("form") not in (None, "")
+                else None
+            ),
+            "probability": _parse_fixed_probability(raw_override["probability"]),
+            "reason": str(raw_override.get("reason", "Config override")).strip(),
+            "match_count": 0,
+        })
+    return prepared
+
+
+def _matching_fixed_horde_probability_override(
+    prepared_overrides: list[dict[str, Any]],
+    *,
+    pokemon: str,
+    location: dict[str, Any],
+    active_season: str,
+    time_of_day: str,
+) -> dict[str, Any] | None:
+    matches: list[dict[str, Any]] = []
+    for override in prepared_overrides:
+        if override["pokemon"] != normalize_name(pokemon).casefold():
+            continue
+        if override["region_id"] != str(location.get("region_id", "")):
+            continue
+        if override["location_id"] != str(location.get("location_id", "")):
+            continue
+        if override["encounter_type"] != str(location.get("type", "")).strip().casefold():
+            continue
+        if override["season"] is not None and override["season"] != active_season.casefold():
+            continue
+        if override["time_of_day"] is not None and override["time_of_day"] != time_of_day.casefold():
+            continue
+        if override["form"] is not None and override["form"] != str(location.get("form", "")):
+            continue
+        matches.append(override)
+
+    if len(matches) > 1:
+        indexes = ", ".join(str(match["index"]) for match in matches)
+        raise ValueError(
+            "Multiple fixed horde probability overrides match "
+            f"{pokemon} at location {location.get('location_id')} "
+            f"({active_season}/{time_of_day}): {indexes}"
+        )
+    if not matches:
+        return None
+
+    matches[0]["match_count"] += 1
+    return matches[0]
+
+
 def family_set_from_names(
     raw_names: Iterable[str], name_to_families: dict[str, set[str]]
 ) -> set[str]:
@@ -296,9 +415,22 @@ def family_set_from_names(
 
 
 def iter_active_horde_rows(
-    monsters: list[dict[str, Any]], mapping_by_id: dict[int, dict[str, Any]]
+    monsters: list[dict[str, Any]],
+    mapping_by_id: dict[int, dict[str, Any]],
+    fixed_horde_probability_overrides: Sequence[dict[str, Any]] | None = None,
 ) -> Iterator[dict[str, Any]]:
+    """Yield active horde rows, including configured fixed-probability entries.
+
+    A fixed probability is the final probability within the Sweet Scent horde
+    pool. The remaining non-fixed rows are normalized proportionally into the
+    probability mass left after all fixed overrides. This is required for
+    entries such as Zorua whose Pokédex rarity is hidden as ``???``.
+    """
+    prepared_overrides = _prepare_fixed_horde_probability_overrides(
+        fixed_horde_probability_overrides
+    )
     record_id = 0
+
     for monster in monsters:
         monster_id = int(monster["id"])
         mapping = mapping_by_id[monster_id]
@@ -310,14 +442,31 @@ def iter_active_horde_rows(
                 continue
             if mapping["base_points"] == "":
                 continue
+
             horde_size = 5 if is_5x else 3
             season = str(location.get("season", "Any"))
-            active_seasons: Sequence[str] = SEASONS if season.casefold() == "any" else (season,)
+            active_seasons: Sequence[str] = (
+                SEASONS if season.casefold() == "any" else (season,)
+            )
+
             for active_season in active_seasons:
                 for time_of_day in TIMES:
-                    raw_split = parse_percent(location.get(f"rarity_{time_of_day}"))
-                    if raw_split <= 0:
+                    raw_rarity_value = location.get(f"rarity_{time_of_day}")
+                    raw_split = parse_percent(raw_rarity_value)
+                    override = _matching_fixed_horde_probability_override(
+                        prepared_overrides,
+                        pokemon=pokemon,
+                        location=location,
+                        active_season=active_season,
+                        time_of_day=time_of_day,
+                    )
+                    fixed_probability = (
+                        float(override["probability"]) if override is not None else None
+                    )
+
+                    if raw_split <= 0 and fixed_probability is None:
                         continue
+
                     record_id += 1
                     yield {
                         "horde_record_id": record_id,
@@ -339,10 +488,34 @@ def iter_active_horde_rows(
                         "source_season": season,
                         "season": active_season,
                         "time_of_day": time_of_day,
+                        "raw_rarity_value": str(raw_rarity_value or ""),
                         "raw_horde_split_percent": raw_split,
+                        "fixed_horde_roll_probability": fixed_probability,
+                        "probability_override_reason": (
+                            str(override["reason"]) if override is not None else ""
+                        ),
+                        "probability_override_index": (
+                            int(override["index"]) if override is not None else ""
+                        ),
                         "rarity_flags": location.get("rarity_flags", ""),
                     }
 
+    unmatched = [
+        override for override in prepared_overrides if int(override["match_count"]) == 0
+    ]
+    if unmatched:
+        descriptions = [
+            (
+                f"#{override['index']} {override['pokemon']} / "
+                f"region {override['region_id']} / location {override['location_id']} / "
+                f"{override['encounter_type']}"
+            )
+            for override in unmatched
+        ]
+        raise ValueError(
+            "Fixed horde probability override matched no active horde rows: "
+            + "; ".join(descriptions)
+        )
 
 def annotate_location_instances(
     rows: list[dict[str, Any]],
@@ -380,8 +553,8 @@ def annotate_temporal_exclusivity(
         temporal exclusivity = 1 / quotient = 12 / distinct combinations
 
     The same information is also calculated for the union of each scoring
-    evolution family for transparency, but route scoring uses the species-level
-    measure requested by the team.
+    evolution family. Route scoring uses this family-level union because every
+    member of an evolution family shares the same Shiny Wars score.
     """
     combos_by_species: dict[str, set[tuple[str, str]]] = defaultdict(set)
     combos_by_family: dict[str, set[tuple[str, str]]] = defaultdict(set)
@@ -479,50 +652,150 @@ def context_id_from_key(key: tuple[Any, ...]) -> str:
     return "|".join(str(value) for value in key)
 
 
-def probability_basis(encounter_type: str, total_raw_split: float) -> str:
+def probability_basis(
+    encounter_type: str,
+    total_raw_split: float,
+    fixed_probability_total: float = 0.0,
+) -> str:
     if encounter_type.casefold() == "sweet scent":
-        return "Normalized explicit Sweet Scent horde table"
-    if math.isclose(total_raw_split, STANDARD_HORDE_POOL_PERCENT, abs_tol=0.02):
-        return "Normalized standard 5% wild horde split"
-    return f"Normalized active horde splits (raw total {format_number(total_raw_split, 4)}%)"
+        base = "Normalized explicit Sweet Scent horde table"
+    elif math.isclose(total_raw_split, STANDARD_HORDE_POOL_PERCENT, abs_tol=0.02):
+        base = "Normalized standard 5% wild horde split"
+    else:
+        base = (
+            "Normalized active horde splits "
+            f"(raw total {format_number(total_raw_split, 4)}%)"
+        )
 
+    if fixed_probability_total > 0:
+        return (
+            f"{base}; {format_number(fixed_probability_total * 100, 4)}% "
+            "fixed probability and proportional normalization of the remainder"
+        )
+    return base
 
 def normalize_horde_probabilities(
     raw_rows: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Normalize every active horde context to a total probability of 1.
+
+    Explicit Sweet Scent tables and standard 5% horde splits are both treated
+    as relative weights. Fixed overrides reserve their configured final share
+    first; all remaining records keep their relative ratios within the leftover
+    probability mass.
+    """
     grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in raw_rows:
         grouped[context_key(row)].append(row)
 
     normalized_rows: list[dict[str, Any]] = []
     by_context: dict[str, list[dict[str, Any]]] = {}
+    tolerance = 1e-9
+
     for key, records in grouped.items():
-        total_raw = sum(float(record["raw_horde_split_percent"]) for record in records)
-        if total_raw <= 0:
-            continue
+        fixed_records = [
+            record
+            for record in records
+            if record.get("fixed_horde_roll_probability") is not None
+        ]
+        variable_records = [
+            record
+            for record in records
+            if record.get("fixed_horde_roll_probability") is None
+        ]
+
+        fixed_total = sum(
+            float(record["fixed_horde_roll_probability"])
+            for record in fixed_records
+        )
+        if fixed_total > 1.0 + tolerance:
+            raise ValueError(
+                f"Fixed horde probabilities exceed 100% for context {key}: "
+                f"{format_number(fixed_total * 100, 6)}%"
+            )
+
+        remaining_probability = max(0.0, 1.0 - fixed_total)
+        variable_raw_total = sum(
+            float(record["raw_horde_split_percent"])
+            for record in variable_records
+        )
+        all_raw_total = sum(
+            float(record["raw_horde_split_percent"])
+            for record in records
+        )
+
+        if variable_records and variable_raw_total <= 0:
+            raise ValueError(
+                f"No positive raw horde weights remain for context {key}"
+            )
+        if not variable_records and remaining_probability > tolerance:
+            raise ValueError(
+                f"Fixed horde probabilities do not fill context {key}: "
+                f"{format_number(fixed_total * 100, 6)}%"
+            )
+
+        probabilities: dict[int, float] = {}
+        for record in records:
+            fixed_probability = record.get("fixed_horde_roll_probability")
+            if fixed_probability is not None:
+                roll_probability = float(fixed_probability)
+            else:
+                roll_probability = (
+                    remaining_probability
+                    * float(record["raw_horde_split_percent"])
+                    / variable_raw_total
+                )
+            probabilities[id(record)] = roll_probability
+
+        probability_sum = sum(probabilities.values())
+        if not math.isclose(probability_sum, 1.0, rel_tol=0.0, abs_tol=1e-8):
+            raise ValueError(
+                f"Normalized horde probabilities do not sum to 100% for {key}: "
+                f"{format_number(probability_sum * 100, 8)}%"
+            )
+
         expected_checks = sum(
-            (float(record["raw_horde_split_percent"]) / total_raw) * float(record["horde_size"])
+            probabilities[id(record)] * float(record["horde_size"])
             for record in records
         )
         context_id = context_id_from_key(key)
-        basis = probability_basis(str(key[4]), total_raw)
+        encounter_type = str(records[0]["encounter_type"])
+        basis = probability_basis(
+            encounter_type,
+            all_raw_total,
+            fixed_probability_total=fixed_total,
+        )
         context_records: list[dict[str, Any]] = []
+
         for record in records:
-            roll_probability = float(record["raw_horde_split_percent"]) / total_raw
+            roll_probability = probabilities[id(record)]
             check_weight = roll_probability * float(record["horde_size"])
             row = dict(record)
             row.update({
                 "context_id": context_id,
-                "horde_pool_raw_total_percent": format_number(total_raw),
+                "horde_pool_raw_total_percent": format_number(all_raw_total),
+                "fixed_horde_probability_total_percent": format_number(
+                    fixed_total * 100
+                ),
+                "probability_override_applied": bool(fixed_total > 0),
                 "horde_roll_probability": format_number(roll_probability),
-                "horde_roll_probability_percent": format_number(roll_probability * 100),
+                "horde_roll_probability_percent": format_number(
+                    roll_probability * 100
+                ),
                 "expected_checks_per_sweet_scent": format_number(expected_checks),
-                "shiny_check_share": format_number(check_weight / expected_checks if expected_checks else 0),
-                "shiny_check_share_percent": format_number((check_weight / expected_checks * 100) if expected_checks else 0),
+                "shiny_check_share": format_number(
+                    check_weight / expected_checks if expected_checks else 0
+                ),
+                "shiny_check_share_percent": format_number(
+                    (check_weight / expected_checks * 100)
+                    if expected_checks
+                    else 0
+                ),
                 "probability_basis": basis,
             })
             context_records.append(row)
             normalized_rows.append(row)
+
         by_context[context_id] = context_records
 
     normalized_rows.sort(
@@ -537,7 +810,6 @@ def normalize_horde_probabilities(
         )
     )
     return normalized_rows, by_context
-
 
 def score_for_family(family: str, base_points: float, state: ScoringState) -> tuple[float, str]:
     key = name_key(family)
@@ -554,66 +826,40 @@ def aggregate_context_targets(
     use_temporal_exclusivity: bool = False,
 ) -> list[dict[str, Any]]:
     family_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
-
     for record in records:
         family_groups[str(record["scoring_family"])].append(record)
 
     target_rows: list[dict[str, Any]] = []
-
     expected_checks = sum(
-        float(record["horde_roll_probability"])
-        * float(record["horde_size"])
+        float(record["horde_roll_probability"]) * float(record["horde_size"])
         for record in records
     )
 
     for family, family_records in family_groups.items():
         first = family_records[0]
-
         base_points = float(first["base_points"])
-
-        effective_score, score_status = score_for_family(
-            family,
-            base_points,
-            state,
-        )
-
+        effective_score, score_status = score_for_family(family, base_points, state)
         horde_probability = sum(
-            float(record["horde_roll_probability"])
-            for record in family_records
+            float(record["horde_roll_probability"]) for record in family_records
         )
-
         check_weight = sum(
-            float(record["horde_roll_probability"])
-            * float(record["horde_size"])
+            float(record["horde_roll_probability"]) * float(record["horde_size"])
             for record in family_records
         )
 
-        family_combination_count = int(
-            first["family_temporal_combination_count"]
-        )
-
-        family_exclusivity = float(
-            first["family_temporal_exclusivity"]
-        )
-
+        family_combination_count = int(first["family_temporal_combination_count"])
+        family_exclusivity = float(first["family_temporal_exclusivity"])
         family_score_multiplier = temporal_score_multiplier(
             family_combination_count
         )
 
-        legacy_contribution = (
-            check_weight * effective_score
-        )
-
-        exclusivity_contribution = (
-            legacy_contribution
-            * family_score_multiplier
-        )
-
+        legacy_contribution = check_weight * effective_score
         raw_exclusivity_contribution = (
-            legacy_contribution
-            * family_exclusivity
+            legacy_contribution * family_exclusivity
         )
-
+        exclusivity_contribution = (
+            legacy_contribution * family_score_multiplier
+        )
         ranking_contribution = (
             exclusivity_contribution
             if use_temporal_exclusivity
@@ -627,101 +873,54 @@ def aggregate_context_targets(
             "location_id": first["location_id"],
             "location_full": first["location_full"],
             "location_display": first["location_display"],
-            "location_name_instance_count": (
-                first["location_name_instance_count"]
-            ),
-            "location_name_requires_id": (
-                first["location_name_requires_id"]
-            ),
+            "location_name_instance_count": first["location_name_instance_count"],
+            "location_name_requires_id": first["location_name_requires_id"],
             "encounter_type": first["encounter_type"],
             "season": first["season"],
             "time_of_day": first["time_of_day"],
-
             "scoring_family": family,
-
             "encountered_species": " | ".join(
-                sorted({
-                    str(record["pokemon"])
-                    for record in family_records
-                })
+                sorted({str(record["pokemon"]) for record in family_records})
             ),
-
             "tier": first["tier"],
             "base_points": base_points,
-
             "unique_bonus": (
-                state.unique_bonus
-                if score_status == "new_team_unique"
-                else 0.0
+                state.unique_bonus if score_status == "new_team_unique" else 0.0
             ),
-
             "effective_points_if_shiny": effective_score,
             "score_status": score_status,
-
-            "horde_roll_probability": format_number(
-                horde_probability
-            ),
-
+            "horde_roll_probability": format_number(horde_probability),
             "horde_roll_probability_percent": format_number(
                 horde_probability * 100
             ),
-
             "shiny_check_share": format_number(
-                check_weight / expected_checks
-                if expected_checks
-                else 0
+                check_weight / expected_checks if expected_checks else 0
             ),
-
             "shiny_check_share_percent": format_number(
-                (
-                    check_weight
-                    / expected_checks
-                    * 100
-                )
+                (check_weight / expected_checks * 100)
                 if expected_checks
                 else 0
             ),
-
             "weighted_horde_size": format_number(
-                check_weight / horde_probability
-                if horde_probability
-                else 0
+                check_weight / horde_probability if horde_probability else 0
             ),
-
-            "family_temporal_combination_count": (
-                family_combination_count
-            ),
-
+            "family_temporal_combination_count": family_combination_count,
             "family_temporal_exclusivity": format_number(
-                family_exclusivity,
-                6,
+                family_exclusivity, 6
             ),
-
             "family_temporal_score_multiplier": format_number(
-                family_score_multiplier,
-                6,
+                family_score_multiplier, 6
             ),
-
-            "score_index_contribution": format_number(
-                legacy_contribution
-            ),
-
+            "score_index_contribution": format_number(legacy_contribution),
             "raw_exclusivity_score_index_contribution": format_number(
-                raw_exclusivity_contribution,
-                6,
+                raw_exclusivity_contribution, 6
             ),
-
-            "exclusivity_adjusted_score_index_contribution": (
-                format_number(
-                    exclusivity_contribution,
-                    6,
-                )
+            "exclusivity_adjusted_score_index_contribution": format_number(
+                exclusivity_contribution, 6
             ),
-
             "ranking_score_index_contribution": format_number(
                 ranking_contribution
             ),
-
             "ranking_mode": (
                 "temporal_exclusivity"
                 if use_temporal_exclusivity
@@ -731,30 +930,16 @@ def aggregate_context_targets(
 
     target_rows.sort(
         key=lambda row: (
-            float(
-                row[
-                    "ranking_score_index_contribution"
-                ]
-            ),
-            float(
-                row[
-                    "effective_points_if_shiny"
-                ]
-            ),
+            float(row["ranking_score_index_contribution"]),
+            float(row["effective_points_if_shiny"]),
             float(row["shiny_check_share"]),
             str(row["scoring_family"]),
         ),
         reverse=True,
     )
-
-    for index, row in enumerate(
-        target_rows,
-        start=1,
-    ):
+    for index, row in enumerate(target_rows, start=1):
         row["target_rank"] = index
-
     return target_rows
-
 
 def rank_contexts(
     by_context: dict[str, list[dict[str, Any]]],
@@ -1380,7 +1565,13 @@ def main() -> None:
         player_caught_families=frozenset(player_families),
     )
 
-    raw_horde_rows = list(iter_active_horde_rows(monsters, mapping_by_id))
+    raw_horde_rows = list(
+        iter_active_horde_rows(
+            monsters,
+            mapping_by_id,
+            config.get("fixed_horde_probability_overrides", []),
+        )
+    )
     raw_horde_rows, location_diagnostics = annotate_location_instances(raw_horde_rows)
     diagnostics.update(location_diagnostics)
     raw_horde_rows, temporal_exclusivity_rows, temporal_diagnostics = annotate_temporal_exclusivity(raw_horde_rows)

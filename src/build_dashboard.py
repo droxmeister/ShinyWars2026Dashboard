@@ -220,23 +220,65 @@ def live_filter_payload(config: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def build_static_model(monsters_path: Path, tiers_path: Path):
+def build_static_model(
+    monsters_path: Path,
+    tiers_path: Path,
+    fixed_horde_probability_overrides: list[dict[str, Any]] | None = None,
+):
     monsters, diagnostics = load_monsters(monsters_path)
     tier_map = load_tier_chart(tiers_path)
-    mapping_by_id, name_to_families, mapping_rows = build_tier_mapping(monsters, tier_map)
-    raw_rows = list(iter_active_horde_rows(monsters, mapping_by_id))
+    mapping_by_id, name_to_families, mapping_rows = build_tier_mapping(
+        monsters, tier_map
+    )
+    raw_rows = list(
+        iter_active_horde_rows(
+            monsters,
+            mapping_by_id,
+            fixed_horde_probability_overrides,
+        )
+    )
     raw_rows, location_diagnostics = annotate_location_instances(raw_rows)
-    raw_rows, temporal_rows, temporal_diagnostics = annotate_temporal_exclusivity(raw_rows)
+    raw_rows, temporal_rows, temporal_diagnostics = annotate_temporal_exclusivity(
+        raw_rows
+    )
     horde_rows, by_context = normalize_horde_probabilities(raw_rows)
+
+    sweet_scent_contexts = [
+        records
+        for records in by_context.values()
+        if records
+        and str(records[0]["encounter_type"]).casefold() == "sweet scent"
+    ]
+    override_contexts = [
+        records
+        for records in by_context.values()
+        if records and bool(records[0].get("probability_override_applied"))
+    ]
+    sweet_scent_raw_totals = [
+        float(records[0]["horde_pool_raw_total_percent"])
+        for records in sweet_scent_contexts
+    ]
+
     diagnostics.update(location_diagnostics)
     diagnostics.update(temporal_diagnostics)
-    diagnostics.update(
-        {
-            "tier_chart_entry_count": len(tier_map),
-            "horde_row_count": len(horde_rows),
-            "context_count": len(by_context),
-        }
-    )
+    diagnostics.update({
+        "tier_chart_entry_count": len(tier_map),
+        "horde_row_count": len(horde_rows),
+        "context_count": len(by_context),
+        "sweet_scent_context_count": len(sweet_scent_contexts),
+        "sweet_scent_raw_total_min_percent": (
+            min(sweet_scent_raw_totals) if sweet_scent_raw_totals else 0.0
+        ),
+        "sweet_scent_raw_total_max_percent": (
+            max(sweet_scent_raw_totals) if sweet_scent_raw_totals else 0.0
+        ),
+        "fixed_probability_override_context_count": len(override_contexts),
+        "fixed_probability_override_record_count": sum(
+            1
+            for row in horde_rows
+            if row.get("fixed_horde_roll_probability") is not None
+        ),
+    })
     return {
         "monsters": monsters,
         "mapping_rows": mapping_rows,
@@ -246,7 +288,6 @@ def build_static_model(monsters_path: Path, tiers_path: Path):
         "by_context": by_context,
         "diagnostics": diagnostics,
     }
-
 
 def resolve_catch_families(
     normalized: NormalizedInput,
@@ -276,73 +317,28 @@ def context_family_sets(by_context: dict[str, list[dict[str, Any]]]) -> dict[str
     }
 
 
-def serialize_target(
-    row: dict[str, Any],
-) -> dict[str, Any]:
+def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
     return {
-        "species": str(
-            row["encountered_species"]
-        ),
-
-        "family": str(
-            row["scoring_family"]
-        ),
-
+        "species": str(row["encountered_species"]),
+        "family": str(row["scoring_family"]),
         "tier": row["tier"],
-
-        "basePoints": float(
-            row["base_points"]
-        ),
-
-        "effectivePoints": float(
-            row["effective_points_if_shiny"]
-        ),
-
-        "status": str(
-            row["score_status"]
-        ),
-
+        "basePoints": float(row["base_points"]),
+        "effectivePoints": float(row["effective_points_if_shiny"]),
+        "status": str(row["score_status"]),
         "hordeProbabilityPercent": float(
-            row[
-                "horde_roll_probability_percent"
-            ]
+            row["horde_roll_probability_percent"]
         ),
-
-        "shinyCheckSharePercent": float(
-            row[
-                "shiny_check_share_percent"
-            ]
-        ),
-
-        "weightedHordeSize": float(
-            row["weighted_horde_size"]
-        ),
-
-        "scoreMultiplier": float(
-            row[
-                "family_temporal_score_multiplier"
-            ]
-        ),
-
+        "shinyCheckSharePercent": float(row["shiny_check_share_percent"]),
+        "weightedHordeSize": float(row["weighted_horde_size"]),
+        "scoreMultiplier": float(row["family_temporal_score_multiplier"]),
         "seasonTimeCombinationCount": int(
-            row[
-                "family_temporal_combination_count"
-            ]
+            row["family_temporal_combination_count"]
         ),
-
         "adjustedContribution": float(
-            row[
-                "ranking_score_index_contribution"
-            ]
+            row["ranking_score_index_contribution"]
         ),
-
-        "legacyContribution": float(
-            row[
-                "score_index_contribution"
-            ]
-        ),
+        "legacyContribution": float(row["score_index_contribution"]),
     }
-
 
 def serialize_context(
     row: dict[str, Any],
@@ -407,11 +403,12 @@ def build_views(
             context_id = str(row["context_id"])
             ids.append(context_id)
             if context_id not in entries:
-                entries[context_id] = serialize_context(row, targets_by_context, 0)
+                entries[context_id] = serialize_context(
+                    row, targets_by_context, 0
+                )
                 entries[context_id].pop("rank", None)
         views[key] = ids
     return {"entries": entries, "views": views}
-
 
 def rank_for_state(
     by_context: dict[str, list[dict[str, Any]]],
@@ -555,6 +552,12 @@ def build_payload(
             "playerCount": len(normalized.players),
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
+            "sweetScentContextCount": model["diagnostics"].get(
+                "sweet_scent_context_count", 0
+            ),
+            "fixedProbabilityOverrideContextCount": model["diagnostics"].get(
+                "fixed_probability_override_context_count", 0
+            ),
             "rankingMode": "temporal_exclusivity",
             "scoreAdjustmentByCombinationCount": {
                 "1": 2.0,
@@ -588,6 +591,8 @@ def build_payload(
         ["Active players", len(normalized.players)],
         ["Team caught evolution families", len(team_families)],
         ["Ranked route contexts", model["diagnostics"]["context_count"]],
+        ["Explicit Sweet Scent contexts", model["diagnostics"].get("sweet_scent_context_count", 0)],
+        ["Fixed-probability override contexts", model["diagnostics"].get("fixed_probability_override_context_count", 0)],
         ["Ranking scope", "All matching route contexts"],
         ["Player context exclusion", "Enabled" if exclusion_enabled else "Disabled"],
         ["Warnings", " | ".join(normalized.warnings)],
@@ -652,7 +657,11 @@ def main() -> None:
         raw_input = load_local_csv(input_dir)
 
     normalized = normalize_input(raw_input)
-    model = build_static_model(args.monsters, args.tiers)
+    model = build_static_model(
+        args.monsters,
+        args.tiers,
+        config.get("fixed_horde_probability_overrides", []),
+    )
     generated_at = datetime.now(timezone.utc)
     payload, sync_status, checklist_rows, player_summary_rows = build_payload(
         model, normalized, config, generated_at

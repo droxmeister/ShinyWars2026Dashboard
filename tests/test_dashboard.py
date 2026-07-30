@@ -29,12 +29,13 @@ ROOT = Path(__file__).resolve().parents[1]
 class DashboardTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
+        cls.config = json.loads(
+            (ROOT / "config/dashboard_config.json").read_text(encoding="utf-8")
+        )
         cls.model = build_static_model(
             ROOT / "data/monsters.json",
             ROOT / "data/shiny_wars_2026_tier_chart.csv",
-        )
-        cls.config = json.loads(
-            (ROOT / "config/dashboard_config.json").read_text(encoding="utf-8")
+            cls.config.get("fixed_horde_probability_overrides", []),
         )
 
     def test_static_model_keeps_location_ids(self) -> None:
@@ -248,6 +249,94 @@ class DashboardTests(unittest.TestCase):
         self.assertAlmostEqual(
             target["ranking_score_index_contribution"],
             55.0,
+        )
+
+
+    def test_explicit_sweet_scent_tables_are_complete_and_normalized(self) -> None:
+        contexts = [
+            records
+            for records in self.model["by_context"].values()
+            if records
+            and str(records[0]["encounter_type"]).casefold() == "sweet scent"
+        ]
+
+        self.assertGreater(len(contexts), 0)
+        for records in contexts:
+            self.assertAlmostEqual(
+                sum(float(row["horde_roll_probability"]) for row in records),
+                1.0,
+                places=7,
+            )
+            raw_total = float(records[0]["horde_pool_raw_total_percent"])
+            self.assertGreaterEqual(raw_total, 99.98)
+            self.assertLessEqual(raw_total, 100.02)
+            self.assertIn(
+                "Normalized explicit Sweet Scent horde table",
+                str(records[0]["probability_basis"]),
+            )
+
+    def test_zorua_override_reserves_five_percent_and_normalizes_remainder(self) -> None:
+        matching_contexts = [
+            records
+            for records in self.model["by_context"].values()
+            if records
+            and str(records[0]["region"]) == "Unova"
+            and str(records[0]["location_id"]) == "385"
+            and str(records[0]["encounter_type"]) == "Grass"
+            and str(records[0]["season"]) == "Summer"
+            and str(records[0]["time_of_day"]) == "morning"
+        ]
+
+        self.assertEqual(len(matching_contexts), 1)
+        records = matching_contexts[0]
+        probabilities = {
+            str(row["pokemon"]): float(row["horde_roll_probability"])
+            for row in records
+        }
+
+        self.assertAlmostEqual(sum(probabilities.values()), 1.0, places=7)
+        self.assertAlmostEqual(probabilities["Zorua"], 0.05, places=7)
+        self.assertAlmostEqual(probabilities["Heracross"], 0.38, places=7)
+        self.assertAlmostEqual(probabilities["Petilil"], 0.38, places=7)
+        self.assertAlmostEqual(probabilities["Venipede"], 0.19, places=7)
+        self.assertTrue(all(bool(row["probability_override_applied"]) for row in records))
+        self.assertAlmostEqual(
+            float(records[0]["fixed_horde_probability_total_percent"]),
+            5.0,
+            places=7,
+        )
+
+        zorua = next(row for row in records if row["pokemon"] == "Zorua")
+        self.assertEqual(zorua["raw_rarity_value"], "???")
+        self.assertAlmostEqual(
+            float(zorua["fixed_horde_roll_probability"]),
+            0.05,
+            places=7,
+        )
+
+    def test_zorua_override_applies_to_all_twelve_season_time_combinations(self) -> None:
+        zorua_rows = [
+            row
+            for row in self.model["horde_rows"]
+            if row["pokemon"] == "Zorua"
+            and str(row["location_id"]) == "385"
+            and row["encounter_type"] == "Grass"
+        ]
+
+        self.assertEqual(len(zorua_rows), 12)
+        self.assertEqual(
+            {(row["season"], row["time_of_day"]) for row in zorua_rows},
+            {
+                (season, time_name)
+                for season in ("Summer", "Autumn", "Winter", "Spring")
+                for time_name in ("morning", "day", "night")
+            },
+        )
+        self.assertTrue(
+            all(
+                abs(float(row["horde_roll_probability"]) - 0.05) < 1e-9
+                for row in zorua_rows
+            )
         )
 
     def test_game_clock_and_time_windows(self) -> None:
