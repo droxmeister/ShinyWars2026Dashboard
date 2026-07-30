@@ -276,21 +276,71 @@ def context_family_sets(by_context: dict[str, list[dict[str, Any]]]) -> dict[str
     }
 
 
-def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
+def serialize_target(
+    row: dict[str, Any],
+) -> dict[str, Any]:
     return {
-        "species": str(row["encountered_species"]),
-        "family": str(row["scoring_family"]),
+        "species": str(
+            row["encountered_species"]
+        ),
+
+        "family": str(
+            row["scoring_family"]
+        ),
+
         "tier": row["tier"],
-        "basePoints": float(row["base_points"]),
-        "effectivePoints": float(row["effective_points_if_shiny"]),
-        "status": str(row["score_status"]),
-        "hordeProbabilityPercent": float(row["horde_roll_probability_percent"]),
-        "shinyCheckSharePercent": float(row["shiny_check_share_percent"]),
-        "weightedHordeSize": float(row["weighted_horde_size"]),
-        "scoreMultiplier": float(row["species_temporal_score_multiplier_average"]),
-        "adjustedContribution": float(row["ranking_score_index_contribution"]),
-        "legacyContribution": float(row["score_index_contribution"]),
-        "seasonTimeCombinationCount": int(row["species_temporal_combination_count_min"]),
+
+        "basePoints": float(
+            row["base_points"]
+        ),
+
+        "effectivePoints": float(
+            row["effective_points_if_shiny"]
+        ),
+
+        "status": str(
+            row["score_status"]
+        ),
+
+        "hordeProbabilityPercent": float(
+            row[
+                "horde_roll_probability_percent"
+            ]
+        ),
+
+        "shinyCheckSharePercent": float(
+            row[
+                "shiny_check_share_percent"
+            ]
+        ),
+
+        "weightedHordeSize": float(
+            row["weighted_horde_size"]
+        ),
+
+        "scoreMultiplier": float(
+            row[
+                "family_temporal_score_multiplier"
+            ]
+        ),
+
+        "seasonTimeCombinationCount": int(
+            row[
+                "family_temporal_combination_count"
+            ]
+        ),
+
+        "adjustedContribution": float(
+            row[
+                "ranking_score_index_contribution"
+            ]
+        ),
+
+        "legacyContribution": float(
+            row[
+                "score_index_contribution"
+            ]
+        ),
     }
 
 

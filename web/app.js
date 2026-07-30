@@ -217,37 +217,106 @@ function combinationLabelInfo(combinationCount) {
   };
 }
 
+function combinationLabelInfo(
+  combinationCount
+) {
+  const count = Number(
+    combinationCount
+  );
+
+  if (
+    !Number.isInteger(count) ||
+    count < 1
+  ) {
+    return null;
+  }
+
+  const text =
+    count === 1
+      ? "1 S/T Combination"
+      : `${count} S/T Combinations`;
+
+  if (count === 1) {
+    return {
+      text,
+      cssClass: "combination-red",
+    };
+  }
+
+  if (count === 2) {
+    return {
+      text,
+      cssClass: "combination-orange",
+    };
+  }
+
+  if (count <= 4) {
+    return {
+      text,
+      cssClass: "combination-yellow",
+    };
+  }
+
+  return {
+    text,
+    cssClass: "combination-green",
+  };
+}
+
 function targetDetailsHtml(targets) {
-  if (!Array.isArray(targets) || targets.length === 0) {
+  if (
+    !Array.isArray(targets) ||
+    targets.length === 0
+  ) {
     return `
       <article class="target-card">
-        <strong>No target details available</strong>
+        <strong>
+          No target details available
+        </strong>
       </article>
     `;
   }
 
   return targets
     .map((target) => {
-      const [label, cssClass] = statusLabel(target.status);
-
-      const combinationInfo = combinationLabelInfo(
-        target.seasonTimeCombinationCount
+      const [
+        label,
+        cssClass,
+      ] = statusLabel(
+        target.status
       );
 
-      const combinationLabel = combinationInfo
-        ? `
-          <span class="pill ${combinationInfo.cssClass}">
-            ${escapeHtml(combinationInfo.text)}
-          </span>
-        `
-        : "";
+      const combinationInfo =
+        combinationLabelInfo(
+          target
+            .seasonTimeCombinationCount
+        );
+
+      const combinationLabel =
+        combinationInfo
+          ? `
+            <span
+              class="pill ${combinationInfo.cssClass}"
+            >
+              ${escapeHtml(
+                combinationInfo.text
+              )}
+            </span>
+          `
+          : "";
 
       return `
         <article class="target-card">
-          <strong>${escapeHtml(target.species)}</strong>
+          <strong>
+            ${escapeHtml(
+              target.species
+            )}
+          </strong>
 
           <div class="target-pill-row">
-            <span class="pill ${cssClass}">
+            <span
+              class="pill ${cssClass}"
+            >
               ${escapeHtml(label)}
             </span>
 
@@ -256,7 +325,11 @@ function targetDetailsHtml(targets) {
 
           <dl>
             <dt>Evolution family</dt>
-            <dd>${escapeHtml(target.family)}</dd>
+            <dd>
+              ${escapeHtml(
+                target.family
+              )}
+            </dd>
 
             <dt>Points if shiny</dt>
             <dd>
@@ -269,7 +342,8 @@ function targetDetailsHtml(targets) {
             <dt>Horde chance</dt>
             <dd>
               ${formatNumber(
-                target.hordeProbabilityPercent,
+                target
+                  .hordeProbabilityPercent,
                 1
               )}%
             </dd>
@@ -293,7 +367,8 @@ function targetDetailsHtml(targets) {
             <dt>Legacy contribution</dt>
             <dd>
               ${formatNumber(
-                target.legacyContribution,
+                target
+                  .legacyContribution,
                 1
               )}
             </dd>
@@ -301,7 +376,8 @@ function targetDetailsHtml(targets) {
             <dt>Adjusted contribution</dt>
             <dd>
               ${formatNumber(
-                target.adjustedContribution,
+                target
+                  .adjustedContribution,
                 1
               )}
             </dd>
@@ -998,30 +1074,3 @@ els.methodButton.addEventListener(
 );
 
 init();
-
-function combinationLabelInfo(combinationCount) {
-  const count = Number(combinationCount);
-
-  if (!Number.isFinite(count) || count < 1) {
-    return null;
-  }
-
-  const text =
-    count === 1
-      ? "1 S/T Combination"
-      : `${count} S/T Combinations`;
-
-  if (count === 1) {
-    return { text, cssClass: "combination-red" };
-  }
-
-  if (count === 2) {
-    return { text, cssClass: "combination-orange" };
-  }
-
-  if (count === 3 || count === 4) {
-    return { text, cssClass: "combination-yellow" };
-  }
-
-  return { text, cssClass: "combination-green" };
-}

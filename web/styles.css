@@ -175,8 +175,9 @@ footer { display: flex; justify-content: space-between; color: var(--muted); fon
 .target-pill-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 0.5rem;
-  margin: 0.35rem 0 0.6rem 0;
+  margin: 0.4rem 0 0.65rem;
 }
 
 .pill.combination-red {

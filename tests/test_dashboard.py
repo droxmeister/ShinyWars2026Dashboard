@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import json
-import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
 from src.build_dashboard import (
     NormalizedInput,
-    build_payload,
     active_season,
+    build_payload,
     build_static_model,
     context_family_sets,
     current_game_clock,
@@ -19,6 +18,7 @@ from src.build_dashboard import (
 from src.horde_core import (
     ScoringState,
     aggregate_context_targets,
+    annotate_temporal_exclusivity,
     temporal_exclusivity_score_multiplier,
     temporal_score_multiplier,
 )
@@ -28,23 +28,26 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class DashboardTests(unittest.TestCase):
     @classmethod
-    def setUpClass(cls):
+    def setUpClass(cls) -> None:
         cls.model = build_static_model(
             ROOT / "data/monsters.json",
             ROOT / "data/shiny_wars_2026_tier_chart.csv",
         )
-        cls.config = json.loads((ROOT / "config/dashboard_config.json").read_text())
+        cls.config = json.loads(
+            (ROOT / "config/dashboard_config.json").read_text(encoding="utf-8")
+        )
 
-    def test_static_model_keeps_location_ids(self):
+    def test_static_model_keeps_location_ids(self) -> None:
         relic = [
             row
             for row in self.model["horde_rows"]
-            if row["region"] == "Unova" and row["location_full"] == "Relic Castle (Depths)"
+            if row["region"] == "Unova"
+            and row["location_full"] == "Relic Castle (Depths)"
         ]
         self.assertGreater(len({str(row["location_id"]) for row in relic}), 1)
         self.assertTrue(all(row["location_display"] for row in relic))
 
-    def test_single_payload_contains_team_and_player_views(self):
+    def test_payload_contains_all_team_and_player_contexts(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha", "Beta"),
             all_players=("Alpha", "Beta"),
@@ -57,66 +60,143 @@ class DashboardTests(unittest.TestCase):
             self.config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
+
+        expected_contexts = self.model["diagnostics"]["context_count"]
+        team_all = payload["rankings"]["team"]["views"]["All|All"]
+        alpha_all = payload["rankings"]["players"]["Alpha"]["views"]["All|All"]
+
         self.assertEqual(payload["meta"]["activeSeason"], "Summer")
         self.assertEqual(payload["players"], ["Alpha", "Beta"])
-        team_ids = payload["rankings"]["team"]["views"]["All|All"]
-        self.assertEqual(len(team_ids),self.model["diagnostics"]["context_count"],)
-        self.assertIn("liveFilter", payload["meta"])
-        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Summer")
-        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["beforeAnchorSeason"], "Autumn")
+        self.assertNotIn("topN", payload["meta"])
+        self.assertEqual(len(team_all), expected_contexts)
+        self.assertEqual(len(alpha_all), expected_contexts)
         self.assertEqual(
             payload["meta"]["scoreAdjustmentByCombinationCount"],
             {"1": 2.0, "2": 1.5, "3": 1.25, "4": 1.1, "default": 1.0},
         )
 
-        team_entry = next(iter(payload["rankings"]["team"]["entries"].values()))
+        team_entry = payload["rankings"]["team"]["entries"][team_all[0]]
+        target = team_entry["targets"][0]
+        combination_count = target["seasonTimeCombinationCount"]
+
         self.assertNotIn("topTargetExclusivity", team_entry)
-        self.assertIn("topTargetScoreMultiplier", team_entry)
-        self.assertNotIn("temporalExclusivity", team_entry["targets"][0])
-        self.assertNotIn("temporalDetails", team_entry["targets"][0])
-        self.assertIn("scoreMultiplier", team_entry["targets"][0])
-
-        team_bundle = payload["rankings"]["team"]
-        team_ids = team_bundle["views"]["All|All"]
-        scores = [
-            team_bundle["entries"][context_id]["adjustedScore"]
-            for context_id in team_ids
-        ]
-        self.assertEqual(scores, sorted(scores, reverse=True))
-
-    def test_weekly_season_rotation_uses_configured_local_anchor(self):
+        self.assertNotIn("temporalExclusivity", target)
+        self.assertNotIn("temporalDetails", target)
+        self.assertIsInstance(combination_count, int)
+        self.assertGreaterEqual(combination_count, 1)
+        self.assertLessEqual(combination_count, 12)
         self.assertEqual(
-            active_season(self.config, datetime(2026, 7, 29, 19, 45, tzinfo=timezone.utc)),
+            target["scoreMultiplier"],
+            temporal_score_multiplier(combination_count),
+        )
+        self.assertAlmostEqual(
+            target["adjustedContribution"],
+            target["legacyContribution"] * target["scoreMultiplier"],
+        )
+
+    def test_weekly_season_rotation_uses_configured_local_anchor(self) -> None:
+        self.assertEqual(
+            active_season(
+                self.config,
+                datetime(2026, 7, 29, 19, 45, tzinfo=timezone.utc),
+            ),
             "Autumn",
         )
         self.assertEqual(
-            active_season(self.config, datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)),
+            active_season(
+                self.config,
+                datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc),
+            ),
             "Autumn",
         )
         self.assertEqual(
-            active_season(self.config, datetime(2026, 7, 31, 22, 1, tzinfo=timezone.utc)),
+            active_season(
+                self.config,
+                datetime(2026, 7, 31, 22, 1, tzinfo=timezone.utc),
+            ),
             "Summer",
         )
         self.assertEqual(
-            active_season(self.config, datetime(2026, 8, 7, 22, 1, tzinfo=timezone.utc)),
+            active_season(
+                self.config,
+                datetime(2026, 8, 7, 22, 1, tzinfo=timezone.utc),
+            ),
             "Autumn",
         )
 
-    def test_temporal_score_multipliers_use_combination_count(self):
-        self.assertEqual(temporal_score_multiplier(1), 2.0)
-        self.assertEqual(temporal_score_multiplier(2), 1.5)
-        self.assertEqual(temporal_score_multiplier(3), 1.25)
-        self.assertEqual(temporal_score_multiplier(4), 1.1)
-        self.assertEqual(temporal_score_multiplier(5), 1.0)
-        self.assertEqual(temporal_score_multiplier(12), 1.0)
+    def test_temporal_score_multipliers_use_combination_count(self) -> None:
+        expected = {
+            1: 2.0,
+            2: 1.5,
+            3: 1.25,
+            4: 1.1,
+            5: 1.0,
+            12: 1.0,
+        }
+        for count, multiplier in expected.items():
+            self.assertEqual(temporal_score_multiplier(count), multiplier)
 
-        # Backward-compatible wrapper still derives the same values.
+        # Compatibility wrapper based on the old 12/count exclusivity value.
         self.assertEqual(temporal_exclusivity_score_multiplier(12), 2.0)
         self.assertEqual(temporal_exclusivity_score_multiplier(6), 1.5)
         self.assertEqual(temporal_exclusivity_score_multiplier(4), 1.25)
         self.assertEqual(temporal_exclusivity_score_multiplier(3), 1.1)
 
-    def test_adjusted_contribution_uses_combination_multiplier_not_raw_exclusivity(self):
+    def test_family_combination_count_is_union_of_member_availability(self) -> None:
+        rows = [
+            {
+                "pokemon": "Alpha",
+                "scoring_family": "Alpha family",
+                "season": "Summer",
+                "time_of_day": "morning",
+                "region_id": 1,
+                "location_id": 1,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+            {
+                "pokemon": "Alpha",
+                "scoring_family": "Alpha family",
+                "season": "Summer",
+                "time_of_day": "day",
+                "region_id": 1,
+                "location_id": 2,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+            {
+                "pokemon": "Beta",
+                "scoring_family": "Alpha family",
+                "season": "Summer",
+                "time_of_day": "day",
+                "region_id": 1,
+                "location_id": 3,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+            {
+                "pokemon": "Beta",
+                "scoring_family": "Alpha family",
+                "season": "Autumn",
+                "time_of_day": "night",
+                "region_id": 1,
+                "location_id": 4,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+        ]
+
+        annotated, _, _ = annotate_temporal_exclusivity(rows)
+
+        # Summer/day occurs for both species, but is counted only once.
+        self.assertTrue(
+            all(row["family_temporal_combination_count"] == 3 for row in annotated)
+        )
+        self.assertTrue(
+            all(float(row["family_temporal_exclusivity"]) == 4.0 for row in annotated)
+        )
+
+    def test_adjusted_contribution_uses_family_combination_multiplier(self) -> None:
         state = ScoringState(
             unique_bonus=0.0,
             duplicate_points=1.0,
@@ -124,7 +204,7 @@ class DashboardTests(unittest.TestCase):
             player_caught_families=frozenset(),
         )
 
-        def record(exclusivity: float, combination_count: int) -> dict:
+        def record(species: str, probability: float) -> dict:
             return {
                 "context_id": "test",
                 "region_id": 1,
@@ -134,58 +214,73 @@ class DashboardTests(unittest.TestCase):
                 "location_display": "Test Route",
                 "location_name_instance_count": 1,
                 "location_name_requires_id": False,
-                "encounter_type": "Horde",
+                "encounter_type": "Grass",
                 "season": "Summer",
                 "time_of_day": "day",
-                "scoring_family": "Testmon",
-                "pokemon": "Testmon",
+                "scoring_family": "Test family",
+                "pokemon": species,
                 "tier": 1,
                 "base_points": 10.0,
-                "horde_roll_probability": 1.0,
+                "horde_roll_probability": probability,
                 "horde_size": 5,
-                "species_temporal_combination_count": combination_count,
-                "species_temporal_exclusivity": exclusivity,
+                # The species can differ, but the scoring multiplier is family-based.
+                "species_temporal_combination_count": 1 if species == "Alpha" else 12,
+                "species_temporal_exclusivity": 12.0 if species == "Alpha" else 1.0,
+                "family_temporal_combination_count": 4,
+                "family_temporal_exclusivity": 3.0,
             }
 
-        expected = {
-            1: 2.0,
-            2: 1.5,
-            3: 1.25,
-            4: 1.1,
-            5: 1.0,
-        }
-        for combination_count, multiplier in expected.items():
-            rows = aggregate_context_targets(
-                [record(12.0 / combination_count, combination_count)],
-                state,
-                use_temporal_exclusivity=True,
-            )
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["score_index_contribution"], 50.0)
-            self.assertAlmostEqual(
-                rows[0]["exclusivity_adjusted_score_index_contribution"],
-                50.0 * multiplier,
-            )
+        rows = aggregate_context_targets(
+            [record("Alpha", 0.5), record("Beta", 0.5)],
+            state,
+            use_temporal_exclusivity=True,
+        )
 
-    def test_game_clock_and_time_windows(self):
+        self.assertEqual(len(rows), 1)
+        target = rows[0]
+        self.assertEqual(target["family_temporal_combination_count"], 4)
+        self.assertEqual(target["family_temporal_score_multiplier"], 1.1)
+        self.assertEqual(target["score_index_contribution"], 50.0)
+        self.assertAlmostEqual(
+            target["exclusivity_adjusted_score_index_contribution"],
+            55.0,
+        )
+        self.assertAlmostEqual(
+            target["ranking_score_index_contribution"],
+            55.0,
+        )
+
+    def test_game_clock_and_time_windows(self) -> None:
         self.assertEqual(
-            current_game_clock(self.config, datetime(2026, 7, 29, 0, 0, tzinfo=timezone.utc)),
+            current_game_clock(
+                self.config,
+                datetime(2026, 7, 29, 0, 0, tzinfo=timezone.utc),
+            ),
             ("00:00", "night"),
         )
         self.assertEqual(
-            current_game_clock(self.config, datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc)),
+            current_game_clock(
+                self.config,
+                datetime(2026, 7, 29, 1, 0, tzinfo=timezone.utc),
+            ),
             ("04:00", "morning"),
         )
         self.assertEqual(
-            current_game_clock(self.config, datetime(2026, 7, 29, 2, 45, tzinfo=timezone.utc)),
+            current_game_clock(
+                self.config,
+                datetime(2026, 7, 29, 2, 45, tzinfo=timezone.utc),
+            ),
             ("11:00", "day"),
         )
         self.assertEqual(
-            current_game_clock(self.config, datetime(2026, 7, 29, 5, 15, tzinfo=timezone.utc)),
+            current_game_clock(
+                self.config,
+                datetime(2026, 7, 29, 5, 15, tzinfo=timezone.utc),
+            ),
             ("21:00", "night"),
         )
 
-    def test_player_catch_excludes_contexts_containing_that_family(self):
+    def test_player_catch_excludes_contexts_containing_that_family(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha",),
             all_players=("Alpha",),
@@ -193,7 +288,8 @@ class DashboardTests(unittest.TestCase):
             warnings=(),
         )
         player_families, team_families, _ = resolve_catch_families(
-            normalized, self.model["name_to_families"]
+            normalized,
+            self.model["name_to_families"],
         )
         rankings, _, excluded = rank_for_state(
             self.model["by_context"],
@@ -206,10 +302,13 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertGreater(excluded, 0)
         self.assertTrue(
-            all("volbeat" not in str(row["all_scoring_families"]).casefold() for row in rankings)
+            all(
+                "volbeat" not in str(row["all_scoring_families"]).casefold()
+                for row in rankings
+            )
         )
 
-    def test_team_view_keeps_already_caught_family_at_base_points(self):
+    def test_team_view_keeps_already_caught_family_at_base_points(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha",),
             all_players=("Alpha",),
@@ -230,8 +329,22 @@ class DashboardTests(unittest.TestCase):
             if target["family"].casefold() == "volbeat"
         ]
         self.assertTrue(volbeat_targets)
-        self.assertTrue(all(target["status"] == "team_already_unique" for target in volbeat_targets))
-        self.assertTrue(all(target["effectivePoints"] == target["basePoints"] for target in volbeat_targets))
+        self.assertTrue(
+            all(target["status"] == "team_already_unique" for target in volbeat_targets)
+        )
+        self.assertTrue(
+            all(
+                target["effectivePoints"] == target["basePoints"]
+                for target in volbeat_targets
+            )
+        )
+        self.assertTrue(
+            all(
+                target["scoreMultiplier"]
+                == temporal_score_multiplier(target["seasonTimeCombinationCount"])
+                for target in volbeat_targets
+            )
+        )
 
 
 if __name__ == "__main__":

@@ -8,6 +8,15 @@ from pathlib import Path
 from typing import Any
 
 
+TOLERANCE = 1e-6
+MULTIPLIER_BY_COMBINATION_COUNT = {
+    1: 2.0,
+    2: 1.5,
+    3: 1.25,
+    4: 1.1,
+}
+
+
 class ValidationError(ValueError):
     pass
 
@@ -27,350 +36,220 @@ def require_list(value: Any, label: str) -> list[Any]:
     return value
 
 
-def require_number(value: Any, label: str) -> float:
+def number(value: Any, label: str) -> float:
     require(
-        isinstance(value, (int, float))
-        and not isinstance(value, bool),
+        isinstance(value, (int, float)) and not isinstance(value, bool),
         f"{label} must be numeric",
     )
-
-    number = float(value)
-
-    require(
-        math.isfinite(number),
-        f"{label} must be finite",
-    )
-
-    return number
+    result = float(value)
+    require(math.isfinite(result), f"{label} must be finite")
+    return result
 
 
-def validate_entry(
-    context_id: str,
-    entry: Any,
-    label: str,
-) -> None:
-    entry = require_dict(entry, label)
+def close(left: float, right: float) -> bool:
+    return math.isclose(left, right, rel_tol=1e-9, abs_tol=TOLERANCE)
+
+
+def expected_multiplier(combination_count: int) -> float:
+    return MULTIPLIER_BY_COMBINATION_COUNT.get(combination_count, 1.0)
+
+
+def validate_target(target_raw: Any, label: str) -> None:
+    target = require_dict(target_raw, label)
 
     require(
-        entry.get("contextId") == context_id,
-        f"{label}.contextId does not match its entries key",
+        isinstance(target.get("species"), str) and target["species"].strip(),
+        f"{label}.species must be a non-empty string",
     )
-
-    adjusted_score = require_number(
-        entry.get("adjustedScore"),
-        f"{label}.adjustedScore",
-    )
-
-    legacy_score = require_number(
-        entry.get("legacyScore"),
-        f"{label}.legacyScore",
-    )
-
     require(
-        adjusted_score >= 0,
-        f"{label}.adjustedScore must not be negative",
+        isinstance(target.get("family"), str) and target["family"].strip(),
+        f"{label}.family must be a non-empty string",
     )
 
+    combination_value = number(
+        target.get("seasonTimeCombinationCount"),
+        f"{label}.seasonTimeCombinationCount",
+    )
     require(
-        legacy_score >= 0,
-        f"{label}.legacyScore must not be negative",
+        combination_value.is_integer() and 1 <= combination_value <= 12,
+        f"{label}.seasonTimeCombinationCount must be an integer from 1 to 12",
     )
+    combination_count = int(combination_value)
 
+    multiplier = number(target.get("scoreMultiplier"), f"{label}.scoreMultiplier")
     require(
-        adjusted_score + 1e-6 >= legacy_score,
-        f"{label}.adjustedScore must not be below legacyScore",
+        close(multiplier, expected_multiplier(combination_count)),
+        f"{label}.scoreMultiplier {multiplier} does not match "
+        f"{combination_count} S/T combinations",
     )
 
+    legacy = number(
+        target.get("legacyContribution"),
+        f"{label}.legacyContribution",
+    )
+    adjusted = number(
+        target.get("adjustedContribution"),
+        f"{label}.adjustedContribution",
+    )
+    require(legacy >= 0 and adjusted >= 0, f"{label} contributions must not be negative")
     require(
-        isinstance(entry.get("topTarget"), str),
-        f"{label}.topTarget must be a string",
+        close(adjusted, legacy * multiplier),
+        f"{label}.adjustedContribution must equal legacyContribution × scoreMultiplier",
     )
 
-    targets = require_list(
-        entry.get("targets"),
-        f"{label}.targets",
-    )
+    for forbidden in ("exclusivity", "temporalExclusivity", "temporalDetails"):
+        require(forbidden not in target, f"{label}.{forbidden} must not be public")
 
+
+def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
+    entry = require_dict(entry_raw, label)
+    require(entry.get("contextId") == context_id, f"{label}.contextId does not match")
+
+    targets = require_list(entry.get("targets"), f"{label}.targets")
+    require(targets, f"{label}.targets must not be empty")
+
+    for index, target in enumerate(targets):
+        validate_target(target, f"{label}.targets[{index}]")
+
+    target_by_species = {
+        str(target["species"]): target
+        for target in targets
+    }
+    top_target_name = entry.get("topTarget")
     require(
-        len(targets) > 0,
-        f"{label}.targets must not be empty",
-    )
-
-    target_names: list[str] = []
-
-    for index, target_raw in enumerate(targets):
-        target_label = f"{label}.targets[{index}]"
-        target = require_dict(target_raw, target_label)
-
-        species = target.get("species")
-
-        require(
-            isinstance(species, str) and species.strip(),
-            f"{target_label}.species must be a non-empty string",
-        )
-
-        target_names.append(species)
-
-        legacy_contribution = require_number(
-            target.get("legacyContribution"),
-            f"{target_label}.legacyContribution",
-        )
-
-        adjusted_contribution = require_number(
-            target.get("adjustedContribution"),
-            f"{target_label}.adjustedContribution",
-        )
-
-        require(
-            legacy_contribution >= 0,
-            f"{target_label}.legacyContribution must not be negative",
-        )
-
-        require(
-            adjusted_contribution >= 0,
-            f"{target_label}.adjustedContribution must not be negative",
-        )
-
-        multiplier = target.get("scoreMultiplier")
-
-        if multiplier is not None:
-            multiplier = require_number(
-                multiplier,
-                f"{target_label}.scoreMultiplier",
-            )
-
-            require(
-                1.0 <= multiplier <= 2.0,
-                f"{target_label}.scoreMultiplier must be between 1.0 and 2.0",
-            )
-
-    require(
-        entry["topTarget"] in target_names,
+        top_target_name in target_by_species,
         f"{label}.topTarget is not present in targets",
     )
 
-    # A combined spot multiplier may be a weighted value such as 1.05.
-    top_multiplier = entry.get("topTargetScoreMultiplier")
-
-    if top_multiplier is not None:
-        top_multiplier = require_number(
-            top_multiplier,
-            f"{label}.topTargetScoreMultiplier",
-        )
-
-        require(
-            1.0 <= top_multiplier <= 2.0,
-            f"{label}.topTargetScoreMultiplier must be between 1.0 and 2.0",
-        )
-
-
-def validate_view(
-    view_ids: Any,
-    entries: dict[str, Any],
-    label: str,
-) -> int:
-    view_ids = require_list(view_ids, label)
-
+    top_multiplier = number(
+        entry.get("topTargetScoreMultiplier"),
+        f"{label}.topTargetScoreMultiplier",
+    )
     require(
-        len(view_ids) == len(set(view_ids)),
-        f"{label} contains duplicate context IDs",
+        close(top_multiplier, float(target_by_species[top_target_name]["scoreMultiplier"])),
+        f"{label}.topTargetScoreMultiplier does not match the top target",
     )
 
-    previous_score: float | None = None
+    legacy_score = number(entry.get("legacyScore"), f"{label}.legacyScore")
+    adjusted_score = number(entry.get("adjustedScore"), f"{label}.adjustedScore")
+    require(legacy_score >= 0 and adjusted_score >= 0, f"{label} scores must not be negative")
 
-    for position, context_id in enumerate(view_ids, start=1):
-        require(
-            context_id in entries,
-            f"{label} references missing context {context_id!r}",
-        )
+    require(
+        close(
+            legacy_score,
+            sum(float(target["legacyContribution"]) for target in targets),
+        ),
+        f"{label}.legacyScore does not equal the target contribution sum",
+    )
+    require(
+        close(
+            adjusted_score,
+            sum(float(target["adjustedContribution"]) for target in targets),
+        ),
+        f"{label}.adjustedScore does not equal the target contribution sum",
+    )
 
-        score = require_number(
-            entries[context_id].get("adjustedScore"),
-            f"{label}[{position}].adjustedScore",
-        )
-
-        if previous_score is not None:
-            require(
-                score <= previous_score + 1e-6,
-                f"{label} is not sorted descending at position {position}",
-            )
-
-        previous_score = score
-
-    return len(view_ids)
+    require("topTargetExclusivity" not in entry, f"{label}.topTargetExclusivity must not be public")
 
 
 def validate_bundle(
     bundle_raw: Any,
     label: str,
     *,
-    expected_team_contexts: int | None = None,
+    expected_all_count: int | None = None,
 ) -> int:
     bundle = require_dict(bundle_raw, label)
+    entries = require_dict(bundle.get("entries"), f"{label}.entries")
+    views = require_dict(bundle.get("views"), f"{label}.views")
+    require("All|All" in views, f"{label}.views must contain All|All")
 
-    entries = require_dict(
-        bundle.get("entries"),
-        f"{label}.entries",
-    )
+    all_ids = require_list(views["All|All"], f"{label}.views.All|All")
+    require(all_ids, f"{label}.views.All|All must not be empty")
+    require(len(all_ids) == len(set(all_ids)), f"{label}.views.All|All contains duplicates")
+    require(set(all_ids) == set(entries), f"{label}.entries must match views.All|All")
 
-    views = require_dict(
-        bundle.get("views"),
-        f"{label}.views",
-    )
-
-    require(
-        "All|All" in views,
-        f"{label}.views must contain All|All",
-    )
-
-    all_ids = require_list(
-        views["All|All"],
-        f"{label}.views.All|All",
-    )
-
-    require(
-        len(all_ids) > 0,
-        f"{label}.views.All|All must not be empty",
-    )
-
-    require(
-        set(all_ids) == set(entries),
-        f"{label}.entries must match the IDs in views.All|All",
-    )
-
-    if expected_team_contexts is not None:
+    if expected_all_count is not None:
         require(
-            len(all_ids) == expected_team_contexts,
-            f"{label} contains {len(all_ids)} contexts, "
-            f"but meta.routeContextCount is {expected_team_contexts}. "
-            "The ranking may still be truncated.",
+            len(all_ids) == expected_all_count,
+            f"{label} contains {len(all_ids)} contexts, expected {expected_all_count}; "
+            "the ranking may still be truncated",
         )
 
     for context_id, entry in entries.items():
-        validate_entry(
-            context_id,
-            entry,
-            f"{label}.entries[{context_id!r}]",
-        )
+        validate_entry(context_id, entry, f"{label}.entries[{context_id!r}]")
 
-    for view_name, view_ids in views.items():
-        validate_view(
-            view_ids,
-            entries,
-            f"{label}.views[{view_name!r}]",
-        )
+    for view_name, view_raw in views.items():
+        view_ids = require_list(view_raw, f"{label}.views[{view_name!r}]")
+        require(len(view_ids) == len(set(view_ids)), f"{label}.{view_name} contains duplicates")
+
+        previous_score: float | None = None
+        for position, context_id in enumerate(view_ids, start=1):
+            require(context_id in entries, f"{label}.{view_name} references missing {context_id!r}")
+            score = number(
+                entries[context_id].get("adjustedScore"),
+                f"{label}.{view_name}[{position}].adjustedScore",
+            )
+            if previous_score is not None:
+                require(
+                    score <= previous_score + TOLERANCE,
+                    f"{label}.{view_name} is not sorted descending at position {position}",
+                )
+            previous_score = score
 
     return len(all_ids)
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    require(
-        path.is_file(),
-        f"Strategy file does not exist: {path}",
-    )
-
+    require(path.is_file(), f"Strategy file does not exist: {path}")
     try:
-        data = json.loads(
-            path.read_text(encoding="utf-8")
+        return require_dict(
+            json.loads(path.read_text(encoding="utf-8")),
+            "root",
         )
     except json.JSONDecodeError as exc:
-        raise ValidationError(
-            f"Strategy file contains invalid JSON: {exc}"
-        ) from exc
-
-    return require_dict(data, "root")
+        raise ValidationError(f"Strategy file contains invalid JSON: {exc}") from exc
 
 
 def main() -> None:
-    path = Path(
-        sys.argv[1]
-        if len(sys.argv) > 1
-        else "web/data/strategy.json"
-    )
+    path = Path(sys.argv[1] if len(sys.argv) > 1 else "web/data/strategy.json")
 
     try:
         data = load_json(path)
+        meta = require_dict(data.get("meta"), "meta")
+        require("topN" not in meta, "meta.topN is still present")
 
-        meta = require_dict(
-            data.get("meta"),
-            "meta",
-        )
+        route_context_count = int(number(meta.get("routeContextCount"), "meta.routeContextCount"))
+        require(route_context_count > 0, "meta.routeContextCount must be positive")
 
-        route_context_count = int(
-            require_number(
-                meta.get("routeContextCount"),
-                "meta.routeContextCount",
-            )
-        )
+        players = require_list(data.get("players"), "players")
+        require(players, "players must not be empty")
+        require(len(players) == len(set(players)), "players contains duplicates")
 
-        players = require_list(
-            data.get("players"),
-            "players",
-        )
-
-        require(
-            len(players) > 0,
-            "players must not be empty",
-        )
-
-        require(
-            len(players) == len(set(players)),
-            "players contains duplicate names",
-        )
-
-        configured_player_count = meta.get("playerCount")
-
-        if configured_player_count is not None:
-            require(
-                int(require_number(
-                    configured_player_count,
-                    "meta.playerCount",
-                )) == len(players),
-                "meta.playerCount does not match players",
-            )
-
-        rankings = require_dict(
-            data.get("rankings"),
-            "rankings",
-        )
-
+        rankings = require_dict(data.get("rankings"), "rankings")
         team_count = validate_bundle(
             rankings.get("team"),
             "rankings.team",
-            expected_team_contexts=route_context_count,
+            expected_all_count=route_context_count,
         )
 
-        player_bundles = require_dict(
-            rankings.get("players"),
-            "rankings.players",
-        )
+        player_bundles = require_dict(rankings.get("players"), "rankings.players")
+        require(set(player_bundles) == set(players), "rankings.players does not match players")
 
-        require(
-            set(player_bundles) == set(players),
-            "rankings.players does not match players",
-        )
-
-        player_counts = []
-
-        for player in players:
-            player_counts.append(
-                validate_bundle(
-                    player_bundles[player],
-                    f"rankings.players[{player!r}]",
-                )
+        player_counts = [
+            validate_bundle(
+                player_bundles[player],
+                f"rankings.players[{player!r}]",
             )
+            for player in players
+        ]
 
     except ValidationError as exc:
-        print(
-            f"Validation failed: {exc}",
-            file=sys.stderr,
-        )
+        print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 
     print(
-        f"Validated {team_count} team contexts and "
-        f"{len(players)} player rankings "
-        f"({min(player_counts)}–{max(player_counts)} contexts per player)."
+        f"Validated {team_count} team contexts and {len(players)} player rankings "
+        f"({min(player_counts)}-{max(player_counts)} contexts per player)."
     )
 
 

@@ -554,118 +554,205 @@ def aggregate_context_targets(
     use_temporal_exclusivity: bool = False,
 ) -> list[dict[str, Any]]:
     family_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
     for record in records:
         family_groups[str(record["scoring_family"])].append(record)
 
     target_rows: list[dict[str, Any]] = []
+
     expected_checks = sum(
-        float(record["horde_roll_probability"]) * float(record["horde_size"])
+        float(record["horde_roll_probability"])
+        * float(record["horde_size"])
         for record in records
     )
+
     for family, family_records in family_groups.items():
-        base_points = float(family_records[0]["base_points"])
-        effective_score, score_status = score_for_family(family, base_points, state)
-        horde_probability = sum(float(record["horde_roll_probability"]) for record in family_records)
+        first = family_records[0]
+
+        base_points = float(first["base_points"])
+
+        effective_score, score_status = score_for_family(
+            family,
+            base_points,
+            state,
+        )
+
+        horde_probability = sum(
+            float(record["horde_roll_probability"])
+            for record in family_records
+        )
+
         check_weight = sum(
-            float(record["horde_roll_probability"]) * float(record["horde_size"])
-            for record in family_records
-        )
-        legacy_contribution = check_weight * effective_score
-        raw_exclusivity_weighted_contribution = sum(
             float(record["horde_roll_probability"])
             * float(record["horde_size"])
-            * effective_score
-            * float(record["species_temporal_exclusivity"])
             for record in family_records
         )
-        exclusivity_contribution = sum(
-            float(record["horde_roll_probability"])
-            * float(record["horde_size"])
-            * effective_score
-            * temporal_score_multiplier(
-                int(record["species_temporal_combination_count"])
-            )
-            for record in family_records
+
+        family_combination_count = int(
+            first["family_temporal_combination_count"]
         )
-        average_exclusivity = (
-            raw_exclusivity_weighted_contribution / legacy_contribution
-            if legacy_contribution else 1.0
+
+        family_exclusivity = float(
+            first["family_temporal_exclusivity"]
         )
-        average_score_multiplier = (
-            exclusivity_contribution / legacy_contribution
-            if legacy_contribution else 1.0
+
+        family_score_multiplier = temporal_score_multiplier(
+            family_combination_count
         )
+
+        legacy_contribution = (
+            check_weight * effective_score
+        )
+
+        exclusivity_contribution = (
+            legacy_contribution
+            * family_score_multiplier
+        )
+
+        raw_exclusivity_contribution = (
+            legacy_contribution
+            * family_exclusivity
+        )
+
         ranking_contribution = (
-            exclusivity_contribution if use_temporal_exclusivity else legacy_contribution
+            exclusivity_contribution
+            if use_temporal_exclusivity
+            else legacy_contribution
         )
-        species_details = sorted({
-            (
-                str(record["pokemon"]),
-                int(record["species_temporal_combination_count"]),
-                float(record["species_temporal_exclusivity"]),
-                temporal_score_multiplier(
-                    int(record["species_temporal_combination_count"])
-                ),
-            )
-            for record in family_records
-        })
+
         target_rows.append({
-            "context_id": family_records[0]["context_id"],
-            "region_id": family_records[0]["region_id"],
-            "region": family_records[0]["region"],
-            "location_id": family_records[0]["location_id"],
-            "location_full": family_records[0]["location_full"],
-            "location_display": family_records[0]["location_display"],
-            "location_name_instance_count": family_records[0]["location_name_instance_count"],
-            "location_name_requires_id": family_records[0]["location_name_requires_id"],
-            "encounter_type": family_records[0]["encounter_type"],
-            "season": family_records[0]["season"],
-            "time_of_day": family_records[0]["time_of_day"],
+            "context_id": first["context_id"],
+            "region_id": first["region_id"],
+            "region": first["region"],
+            "location_id": first["location_id"],
+            "location_full": first["location_full"],
+            "location_display": first["location_display"],
+            "location_name_instance_count": (
+                first["location_name_instance_count"]
+            ),
+            "location_name_requires_id": (
+                first["location_name_requires_id"]
+            ),
+            "encounter_type": first["encounter_type"],
+            "season": first["season"],
+            "time_of_day": first["time_of_day"],
+
             "scoring_family": family,
-            "encountered_species": " | ".join(sorted({str(record["pokemon"]) for record in family_records})),
-            "tier": family_records[0]["tier"],
+
+            "encountered_species": " | ".join(
+                sorted({
+                    str(record["pokemon"])
+                    for record in family_records
+                })
+            ),
+
+            "tier": first["tier"],
             "base_points": base_points,
-            "unique_bonus": state.unique_bonus if score_status == "new_team_unique" else 0.0,
+
+            "unique_bonus": (
+                state.unique_bonus
+                if score_status == "new_team_unique"
+                else 0.0
+            ),
+
             "effective_points_if_shiny": effective_score,
             "score_status": score_status,
-            "horde_roll_probability": format_number(horde_probability),
-            "horde_roll_probability_percent": format_number(horde_probability * 100),
-            "shiny_check_share": format_number(check_weight / expected_checks if expected_checks else 0),
-            "shiny_check_share_percent": format_number((check_weight / expected_checks * 100) if expected_checks else 0),
-            "weighted_horde_size": format_number(check_weight / horde_probability if horde_probability else 0),
-            "species_temporal_exclusivity_average": format_number(average_exclusivity, 6),
-            "species_temporal_exclusivity_min": format_number(min(item[2] for item in species_details)),
-            "species_temporal_exclusivity_max": format_number(max(item[2] for item in species_details)),
-            "species_temporal_score_multiplier_average": format_number(average_score_multiplier, 6),
-            "species_temporal_score_multiplier_min": format_number(min(item[3] for item in species_details)),
-            "species_temporal_score_multiplier_max": format_number(max(item[3] for item in species_details)),
-            "species_temporal_combination_count_min": min(item[1] for item in species_details),
-            "species_temporal_combination_count_max": max(item[1] for item in species_details),
-            "species_temporal_exclusivity_details": " | ".join(
-                (
-                    f"{species}: {count}/12 combos, "
-                    f"exclusivity x{format_number(exclusivity, 4)}, "
-                    f"score x{format_number(score_multiplier, 2)}"
-                )
-                for species, count, exclusivity, score_multiplier in species_details
+
+            "horde_roll_probability": format_number(
+                horde_probability
             ),
-            "score_index_contribution": format_number(legacy_contribution),
-            "exclusivity_adjusted_score_index_contribution": format_number(exclusivity_contribution, 6),
-            "ranking_score_index_contribution": format_number(ranking_contribution),
-            "ranking_mode": "temporal_exclusivity" if use_temporal_exclusivity else "legacy_no_exclusivity",
+
+            "horde_roll_probability_percent": format_number(
+                horde_probability * 100
+            ),
+
+            "shiny_check_share": format_number(
+                check_weight / expected_checks
+                if expected_checks
+                else 0
+            ),
+
+            "shiny_check_share_percent": format_number(
+                (
+                    check_weight
+                    / expected_checks
+                    * 100
+                )
+                if expected_checks
+                else 0
+            ),
+
+            "weighted_horde_size": format_number(
+                check_weight / horde_probability
+                if horde_probability
+                else 0
+            ),
+
+            "family_temporal_combination_count": (
+                family_combination_count
+            ),
+
+            "family_temporal_exclusivity": format_number(
+                family_exclusivity,
+                6,
+            ),
+
+            "family_temporal_score_multiplier": format_number(
+                family_score_multiplier,
+                6,
+            ),
+
+            "score_index_contribution": format_number(
+                legacy_contribution
+            ),
+
+            "raw_exclusivity_score_index_contribution": format_number(
+                raw_exclusivity_contribution,
+                6,
+            ),
+
+            "exclusivity_adjusted_score_index_contribution": (
+                format_number(
+                    exclusivity_contribution,
+                    6,
+                )
+            ),
+
+            "ranking_score_index_contribution": format_number(
+                ranking_contribution
+            ),
+
+            "ranking_mode": (
+                "temporal_exclusivity"
+                if use_temporal_exclusivity
+                else "legacy_no_exclusivity"
+            ),
         })
 
     target_rows.sort(
         key=lambda row: (
-            float(row["ranking_score_index_contribution"]),
-            float(row["effective_points_if_shiny"]),
+            float(
+                row[
+                    "ranking_score_index_contribution"
+                ]
+            ),
+            float(
+                row[
+                    "effective_points_if_shiny"
+                ]
+            ),
             float(row["shiny_check_share"]),
             str(row["scoring_family"]),
         ),
         reverse=True,
     )
-    for index, row in enumerate(target_rows, start=1):
+
+    for index, row in enumerate(
+        target_rows,
+        start=1,
+    ):
         row["target_rank"] = index
+
     return target_rows
 
 
@@ -697,7 +784,7 @@ def rank_contexts(
             * float(record["horde_size"])
             * float(record["base_points"])
             * temporal_score_multiplier(
-                int(record["species_temporal_combination_count"])
+                int(record["family_temporal_combination_count"])
             )
             for record in records
         )
@@ -767,16 +854,16 @@ def rank_contexts(
             "top_target": primary["encountered_species"],
             "top_target_family": primary["scoring_family"],
             "top_target_points": primary["effective_points_if_shiny"],
-            "top_target_temporal_exclusivity": primary["species_temporal_exclusivity_average"],
-            "top_target_score_multiplier": primary["species_temporal_score_multiplier_average"],
-            "top_target_temporal_combinations": primary["species_temporal_combination_count_min"],
+            "top_target_temporal_exclusivity": primary["family_temporal_exclusivity"],
+            "top_target_score_multiplier": primary["family_temporal_score_multiplier"],
+            "top_target_temporal_combinations": primary["family_temporal_combination_count"],
             "top_target_horde_probability_percent": primary["horde_roll_probability_percent"],
             "top_target_shiny_check_share_percent": primary["shiny_check_share_percent"],
             "fallback_target": fallback["encountered_species"] if fallback else "",
             "fallback_target_family": fallback["scoring_family"] if fallback else "",
             "fallback_target_points": fallback["effective_points_if_shiny"] if fallback else "",
-            "fallback_target_temporal_exclusivity": fallback["species_temporal_exclusivity_average"] if fallback else "",
-            "fallback_target_score_multiplier": fallback["species_temporal_score_multiplier_average"] if fallback else "",
+            "fallback_target_temporal_exclusivity": fallback["family_temporal_exclusivity"] if fallback else "",
+            "fallback_target_score_multiplier": fallback["family_temporal_score_multiplier"] if fallback else "",
             "fallback_horde_probability_percent": fallback["horde_roll_probability_percent"] if fallback else "",
             "third_target": third["encountered_species"] if third else "",
             "third_target_family": third["scoring_family"] if third else "",
@@ -934,9 +1021,9 @@ def greedy_unique_strategy(
             "scoring_family": target["scoring_family"],
             "tier": target["tier"],
             "points_on_first_team_catch": target["effective_points_if_shiny"],
-            "target_temporal_combination_count": target["species_temporal_combination_count_min"],
-            "target_temporal_exclusivity": target["species_temporal_exclusivity_average"],
-            "target_temporal_score_multiplier": target["species_temporal_score_multiplier_average"],
+            "target_temporal_combination_count": target["family_temporal_combination_count"],
+            "target_temporal_exclusivity": target["family_temporal_exclusivity"],
+            "target_temporal_score_multiplier": target["family_temporal_score_multiplier"],
             "target_horde_probability_percent": target["horde_roll_probability_percent"],
             "target_shiny_check_share_percent": target["shiny_check_share_percent"],
             "target_legacy_score_index_contribution": target["score_index_contribution"],
