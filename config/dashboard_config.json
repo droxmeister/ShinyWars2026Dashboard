@@ -1,26 +1,48 @@
 {
   "unique_species_bonus": 8,
   "duplicate_points": 1,
-  "temporal_exclusivity_weight_power": 1.0,
   "top_n": 100,
   "exclude_player_context_if_any_target_family_caught": true,
   "live_filter": {
     "default_enabled": true,
     "timezone": "Europe/Berlin",
     "game_clock": {
-      "day_start_hours_local": [2, 8, 14, 20],
+      "day_start_hours_local": [
+        2,
+        8,
+        14,
+        20
+      ],
       "real_seconds_per_game_minute": 15,
       "time_windows": {
-        "morning": {"label": "Morning", "start": "04:00", "end": "10:59"},
-        "day": {"label": "Day", "start": "11:00", "end": "20:59"},
-        "night": {"label": "Night", "start": "21:00", "end": "03:59"}
+        "morning": {
+          "label": "Morning",
+          "start": "04:00",
+          "end": "10:59"
+        },
+        "day": {
+          "label": "Day",
+          "start": "11:00",
+          "end": "20:59"
+        },
+        "night": {
+          "label": "Night",
+          "start": "21:00",
+          "end": "03:59"
+        }
       }
     },
     "season_rotation": {
       "anchor_local": "2026-08-01T00:01:00",
-      "anchor_season": "Winter",
-      "season_order": ["Winter", "Spring", "Summer", "Autumn"],
-      "interval_days": 7
+      "anchor_season": "Summer",
+      "season_order": [
+        "Summer",
+        "Autumn",
+        "Winter",
+        "Spring"
+      ],
+      "interval_days": 7,
+      "before_anchor_season": "Autumn"
     }
   }
 }
