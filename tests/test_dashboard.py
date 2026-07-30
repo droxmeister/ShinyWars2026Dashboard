@@ -9,6 +9,7 @@ from pathlib import Path
 from src.build_dashboard import (
     NormalizedInput,
     active_season,
+    annotate_best_annual_family_contexts,
     build_payload,
     build_static_model,
     context_family_sets,
@@ -50,6 +51,229 @@ class DashboardTests(unittest.TestCase):
         ]
         self.assertGreater(len({str(row["location_id"]) for row in relic}), 1)
         self.assertTrue(all(row["location_display"] for row in relic))
+
+
+    def test_player_names_are_sorted_alphabetically_in_payload(self) -> None:
+        normalized = NormalizedInput(
+            players=("zeta", "Alpha", "beta"),
+            all_players=("zeta", "Alpha", "beta"),
+            catches_by_player={
+                "zeta": (),
+                "Alpha": (),
+                "beta": (),
+            },
+            warnings=(),
+        )
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual(payload["players"], ["Alpha", "beta", "zeta"])
+        self.assertEqual(
+            list(payload["rankings"]["players"]),
+            ["Alpha", "beta", "zeta"],
+        )
+        self.assertEqual(
+            [row["player"] for row in payload["playerSummary"]],
+            ["Alpha", "beta", "zeta"],
+        )
+
+    def test_annual_best_marker_prefers_higher_score_contribution(self) -> None:
+        base = {
+            "scoring_family": "Test family",
+            "region": "Test",
+            "location_display": "Test Route",
+            "encounter_type": "Grass",
+            "season": "Summer",
+            "time_of_day": "day",
+            "weighted_horde_size": 5.0,
+        }
+        rows = [
+            {
+                **base,
+                "context_id": "lower",
+                "horde_roll_probability": 0.25,
+                "ranking_score_index_contribution": 25.0,
+            },
+            {
+                **base,
+                "context_id": "higher",
+                "horde_roll_probability": 0.75,
+                "ranking_score_index_contribution": 75.0,
+            },
+        ]
+
+        annotated, mapping = annotate_best_annual_family_contexts(rows)
+
+        self.assertEqual(mapping, {"test family": "higher"})
+        self.assertEqual(
+            [
+                row["context_id"]
+                for row in annotated
+                if row["is_best_annual_family_context"]
+            ],
+            ["higher"],
+        )
+
+    def test_exactly_one_annual_best_marker_per_family_and_date_independent(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+
+        before_payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+        after_payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+
+        def marker_map(payload: dict) -> dict[str, str]:
+            result: dict[str, str] = {}
+            family_targets: dict[str, list[tuple[str, dict]]] = {}
+            entries = payload["rankings"]["team"]["entries"]
+            for context_id, entry in entries.items():
+                for target in entry["targets"]:
+                    family_targets.setdefault(target["family"], []).append(
+                        (context_id, target)
+                    )
+                    if target["isBestAnnualFamilyContext"]:
+                        self.assertNotIn(target["family"], result)
+                        result[target["family"]] = context_id
+
+            self.assertEqual(set(result), set(family_targets))
+            for family, context_id in result.items():
+                candidates = family_targets[family]
+                marked = next(
+                    target
+                    for candidate_context, target in candidates
+                    if candidate_context == context_id
+                    and target["isBestAnnualFamilyContext"]
+                )
+                self.assertAlmostEqual(
+                    marked["adjustedContribution"],
+                    max(
+                        target["adjustedContribution"]
+                        for _, target in candidates
+                    ),
+                )
+            self.assertEqual(
+                payload["meta"]["annualBestFamilyMarkerCount"],
+                len(result),
+            )
+            return result
+
+        self.assertEqual(
+            marker_map(before_payload),
+            marker_map(after_payload),
+        )
+
+    def test_best_spots_contains_one_row_per_annual_family(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+
+        bundle = payload["rankings"]["team"]
+        best_spots = bundle["bestSpots"]
+        families = [row["bestSpotFamily"] for row in best_spots]
+
+        self.assertEqual(len(families), len(set(families)))
+        self.assertEqual(
+            len(best_spots),
+            payload["meta"]["annualBestFamilyMarkerCount"],
+        )
+        self.assertEqual(
+            len(best_spots),
+            payload["meta"]["annualBestSpotCount"],
+        )
+        self.assertEqual(
+            [row["adjustedScore"] for row in best_spots],
+            sorted(
+                [row["adjustedScore"] for row in best_spots],
+                reverse=True,
+            ),
+        )
+
+        for row in best_spots:
+            self.assertTrue(row["isBestSpotEntry"])
+            self.assertIn(row["sourceContextId"], bundle["entries"])
+            self.assertEqual(len(row["targets"]), 1)
+            target = row["targets"][0]
+            self.assertTrue(target["isBestAnnualFamilyContext"])
+            self.assertEqual(row["bestSpotFamily"], target["family"])
+            self.assertEqual(row["topTargetFamily"], target["family"])
+            self.assertAlmostEqual(
+                row["adjustedScore"],
+                target["adjustedContribution"],
+            )
+            self.assertAlmostEqual(
+                row["legacyScore"],
+                target["legacyContribution"],
+            )
+
+    def test_best_spot_winners_do_not_change_when_summer_expires(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        before_payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+        after_payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+
+        def winner_map(payload: dict) -> dict[str, str]:
+            return {
+                row["bestSpotFamily"]: row["sourceContextId"]
+                for row in payload["rankings"]["team"]["bestSpots"]
+            }
+
+        self.assertEqual(
+            winner_map(before_payload),
+            winner_map(after_payload),
+        )
+        self.assertTrue(
+            any(
+                row["season"] == "Summer"
+                for row in after_payload["rankings"]["team"]["bestSpots"]
+            )
+        )
+        self.assertTrue(
+            all(
+                after_payload["rankings"]["team"]["entries"][context_id]["season"]
+                != "Summer"
+                for context_id in after_payload["rankings"]["team"]["views"]["All|All"]
+            )
+        )
 
     def test_payload_contains_all_team_and_player_contexts(self) -> None:
         normalized = NormalizedInput(

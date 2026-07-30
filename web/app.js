@@ -13,6 +13,8 @@ const state = {
   search: "",
   sortBy: "adjustedScore",
   sortDirection: "desc",
+  bestSpotsOnly: false,
+  bestSpotsPreviousFilters: null,
   visibleCount: PAGE_SIZE,
   clockTimer: null,
 };
@@ -46,6 +48,7 @@ const els = {
   loadMoreButton: null,
   sortAdjustedScore: document.querySelector("#sortAdjustedScore"),
   sortHordeChance: document.querySelector("#sortHordeChance"),
+  bestSpotsToggle: null,
 };
 
 function formatNumber(value, digits = 1) {
@@ -151,6 +154,23 @@ function currentViews() {
 
   if (!bundle) {
     return [];
+  }
+
+  if (state.bestSpotsOnly) {
+    const season = effectiveSeason();
+    const time = effectiveTime();
+    const bestSpots = Array.isArray(
+      bundle.bestSpots
+    )
+      ? bundle.bestSpots
+      : [];
+
+    return bestSpots.filter((row) => {
+      return (
+        (season === "All" || row.season === season) &&
+        (time === "All" || row.timeOfDay === time)
+      );
+    });
   }
 
   const key = `${effectiveSeason()}|${effectiveTime()}`;
@@ -309,6 +329,108 @@ function updateSortButtons() {
   }
 }
 
+function ensureBestSpotsToggle() {
+  if (els.bestSpotsToggle) {
+    return;
+  }
+
+  const explanation = document.querySelector(
+    ".explanation"
+  );
+
+  if (!explanation || !els.methodButton) {
+    return;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "ranking-actions";
+  actions.style.display = "flex";
+  actions.style.alignItems = "center";
+  actions.style.justifyContent = "flex-end";
+  actions.style.gap = "0.65rem";
+  actions.style.flexWrap = "wrap";
+
+  const button = document.createElement("button");
+  button.id = "bestSpotsToggle";
+  button.className = "live-filter-button";
+  button.type = "button";
+  button.setAttribute("aria-pressed", "false");
+  button.title = (
+    "Show exactly one annual best Location / Season / " +
+    "Time combination per evolution family"
+  );
+  button.textContent = "★ Best spots only";
+
+  explanation.insertBefore(
+    actions,
+    els.methodButton
+  );
+  actions.append(
+    button,
+    els.methodButton
+  );
+
+  els.bestSpotsToggle = button;
+}
+
+
+function updateBestSpotsToggle() {
+  if (!els.bestSpotsToggle) {
+    return;
+  }
+
+  els.bestSpotsToggle.classList.toggle(
+    "is-live",
+    state.bestSpotsOnly
+  );
+  els.bestSpotsToggle.setAttribute(
+    "aria-pressed",
+    String(state.bestSpotsOnly)
+  );
+}
+
+
+function setBestSpotsOnly(enabled) {
+  const nextEnabled = Boolean(enabled);
+
+  if (nextEnabled === state.bestSpotsOnly) {
+    return;
+  }
+
+  if (nextEnabled) {
+    state.bestSpotsPreviousFilters = {
+      autoFilter: state.autoFilter,
+      manualSeason: state.manualSeason,
+      manualTime: state.manualTime,
+    };
+    state.bestSpotsOnly = true;
+
+    // Start with the complete annual winner list. Manual filters
+    // remain available for narrowing it by season or time.
+    state.autoFilter = false;
+    state.manualSeason = "All";
+    state.manualTime = "All";
+  } else {
+    state.bestSpotsOnly = false;
+
+    const previous =
+      state.bestSpotsPreviousFilters;
+
+    if (previous) {
+      state.autoFilter = previous.autoFilter;
+      state.manualSeason = previous.manualSeason;
+      state.manualTime = previous.manualTime;
+    }
+
+    state.bestSpotsPreviousFilters = null;
+  }
+
+  resetVisibleCount();
+  updateFilterControls();
+  render();
+}
+
+
 function filteredCurrentRows() {
   const allRows = currentViews();
 
@@ -457,6 +579,21 @@ function combinationLabelInfo(
   };
 }
 
+function bestAnnualTargetMarker(isBest) {
+  if (!isBest) {
+    return "";
+  }
+
+  return `
+    <span
+      class="best-annual-target-marker"
+      title="Best annual Location / Season / Time combination for this evolution family"
+      aria-label="Best annual combination"
+      style="color: #ffd166; margin-left: 0.3rem;"
+    >★</span>
+  `;
+}
+
 function targetDetailsHtml(targets) {
   if (
     !Array.isArray(targets) ||
@@ -506,6 +643,10 @@ function targetDetailsHtml(targets) {
           <strong>
             ${escapeHtml(
               target.species
+            )}
+            ${bestAnnualTargetMarker(
+              target
+                .isBestAnnualFamilyContext
             )}
           </strong>
 
@@ -663,6 +804,8 @@ function updateFilterControls() {
 
   els.season.disabled = state.autoFilter;
   els.time.disabled = state.autoFilter;
+  els.liveFilterToggle.disabled =
+    state.bestSpotsOnly;
 
   els.season.value = season;
   els.time.value = time;
@@ -688,22 +831,32 @@ function updateFilterControls() {
       : "";
 
   els.liveFilterHint.textContent =
-    state.autoFilter
+    state.bestSpotsOnly
       ? (
-          `Automatically using ` +
-          `${state.liveSeason} · ` +
-          `${state.liveTimeLabel}` +
-          simulationSuffix
-        )
-      : (
-          `Manual selection: ` +
-          `${season} · ` +
+          `Best spots use annual winners. ` +
+          `Manual selection: ${season} · ` +
           `${
             time === "All"
               ? "All times"
               : titleCase(time)
           }`
-        );
+        )
+      : state.autoFilter
+        ? (
+            `Automatically using ` +
+            `${state.liveSeason} · ` +
+            `${state.liveTimeLabel}` +
+            simulationSuffix
+          )
+        : (
+            `Manual selection: ` +
+            `${season} · ` +
+            `${
+              time === "All"
+                ? "All times"
+                : titleCase(time)
+            }`
+          );
 }
 
 function refreshLiveContext({
@@ -909,6 +1062,10 @@ function rankingRowHtml({
       <td>
         <span class="target-name">
           ${escapeHtml(row.topTarget)}
+          ${bestAnnualTargetMarker(
+            topTargetDetails
+              ?.isBestAnnualFamilyContext
+          )}
         </span>
 
         <div class="target-meta">
@@ -1036,6 +1193,8 @@ function render() {
     return;
   }
 
+  ensureBestSpotsToggle();
+  updateBestSpotsToggle();
   updateSortButtons();
 
   const allRows = currentViews();
@@ -1068,9 +1227,29 @@ function render() {
     filteredRows.length > 0;
 
   els.selectedView.textContent =
-    selectedName;
+    state.bestSpotsOnly
+      ? `${selectedName} · Best spots`
+      : selectedName;
 
-  if (hasSearch) {
+  if (state.bestSpotsOnly) {
+    els.title.textContent = hasSearch
+      ? (
+          `${filteredRows.length} matching best ` +
+          `spot${
+            filteredRows.length === 1
+              ? ""
+              : "s"
+          } — ${selectedName}`
+        )
+      : (
+          `${allRows.length} annual best ` +
+          `spot${
+            allRows.length === 1
+              ? ""
+              : "s"
+          } — ${selectedName}`
+        );
+  } else if (hasSearch) {
     els.title.textContent =
       `${filteredRows.length} matching ` +
       `spot${
@@ -1102,35 +1281,44 @@ function render() {
       : "manual filters";
 
   els.explanation.textContent =
-    state.viewer === "team"
+    state.bestSpotsOnly
       ? (
-          `Showing all ${filterText} results ` +
-          `in descending score order via ` +
-          `${modeText}. Team view values ` +
-          `uncaught evolution families with ` +
-          `the Unique Species bonus and ` +
-          `already-owned team families at ` +
-          `their normal base points.`
+          `Showing one annual best Location / Season / ` +
+          `Time combination per evolution family for ` +
+          `${filterText}. The score is the selected ` +
+          `family's expected contribution, including ` +
+          `horde split, horde size, event points and ` +
+          `the current S/T multiplier.`
         )
-      : state.data.meta
-          .playerContextExclusionEnabled
+      : state.viewer === "team"
         ? (
             `Showing all ${filterText} results ` +
             `in descending score order via ` +
-            `${modeText}. Player view removes ` +
-            `every context containing an ` +
-            `evolution family already caught ` +
-            `by this player, then ranks the ` +
-            `remaining spots.`
+            `${modeText}. Team view values ` +
+            `uncaught evolution families with ` +
+            `the Unique Species bonus and ` +
+            `already-owned team families at ` +
+            `their normal base points.`
           )
-        : (
-            `Showing all ${filterText} results ` +
-            `in descending score order via ` +
-            `${modeText}. Player view keeps ` +
-            `all routes and reduces personally ` +
-            `duplicated evolution families to ` +
-            `the configured duplicate value.`
-          );
+        : state.data.meta
+            .playerContextExclusionEnabled
+          ? (
+              `Showing all ${filterText} results ` +
+              `in descending score order via ` +
+              `${modeText}. Player view removes ` +
+              `every context containing an ` +
+              `evolution family already caught ` +
+              `by this player, then ranks the ` +
+              `remaining spots.`
+            )
+          : (
+              `Showing all ${filterText} results ` +
+              `in descending score order via ` +
+              `${modeText}. Player view keeps ` +
+              `all routes and reduces personally ` +
+              `duplicated evolution families to ` +
+              `the configured duplicate value.`
+            );
 
   updatePaginationControls(
     visibleRows.length,
@@ -1319,12 +1507,27 @@ els.search.addEventListener(
 els.liveFilterToggle.addEventListener(
   "click",
   () => {
+    if (state.bestSpotsOnly) {
+      return;
+    }
+
     state.autoFilter =
       !state.autoFilter;
 
     resetVisibleCount();
     updateFilterControls();
     render();
+  }
+);
+
+ensureBestSpotsToggle();
+
+els.bestSpotsToggle?.addEventListener(
+  "click",
+  () => {
+    setBestSpotsOnly(
+      !state.bestSpotsOnly
+    );
   }
 );
 

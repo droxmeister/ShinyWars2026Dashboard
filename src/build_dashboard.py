@@ -101,9 +101,12 @@ def normalize_input(raw: SheetInput) -> NormalizedInput:
         raise ValueError("No active players were found in the Players sheet")
 
     return NormalizedInput(
-        players=tuple(active_players),
-        all_players=tuple(all_players),
-        catches_by_player={player: tuple(values) for player, values in catches.items()},
+        players=tuple(sorted(active_players, key=str.casefold)),
+        all_players=tuple(sorted(all_players, key=str.casefold)),
+        catches_by_player={
+            player: tuple(values)
+            for player, values in catches.items()
+        },
         warnings=tuple(warnings),
     )
 
@@ -498,6 +501,60 @@ def context_family_sets(by_context: dict[str, list[dict[str, Any]]]) -> dict[str
     }
 
 
+def _annual_target_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    """Sort targets from best to worst for one evolution family.
+
+    The primary value is the target's expected score contribution, which
+    already includes the horde split and horde size. The remaining values are
+    deterministic tie-breakers so exactly one annual winner is selected even
+    when several contexts have identical expected value.
+    """
+    season = str(row["season"])
+    time_name = str(row["time_of_day"])
+    return (
+        -float(row["ranking_score_index_contribution"]),
+        -float(row["horde_roll_probability"]),
+        -float(row["weighted_horde_size"]),
+        str(row["region"]).casefold(),
+        str(row["location_display"]).casefold(),
+        str(row["encounter_type"]).casefold(),
+        SEASONS.index(season),
+        TIMES.index(time_name),
+        str(row["context_id"]),
+    )
+
+
+def annotate_best_annual_family_contexts(
+    target_rows: list[dict[str, Any]],
+    best_context_by_family: dict[str, str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
+    """Mark exactly one full-year Location/Season/Time winner per family.
+
+    The winner map is calculated from all annual contexts, not from the current
+    recommendation-season filter. Passing an existing map applies the same
+    global markers to team and player views.
+    """
+    if best_context_by_family is None:
+        best_context_by_family = {}
+        for row in sorted(target_rows, key=_annual_target_sort_key):
+            family_key = name_key(str(row["scoring_family"]))
+            best_context_by_family.setdefault(
+                family_key,
+                str(row["context_id"]),
+            )
+
+    annotated: list[dict[str, Any]] = []
+    for target in target_rows:
+        row = dict(target)
+        family_key = name_key(str(row["scoring_family"]))
+        row["is_best_annual_family_context"] = (
+            best_context_by_family.get(family_key)
+            == str(row["context_id"])
+        )
+        annotated.append(row)
+    return annotated, best_context_by_family
+
+
 def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "species": str(row["encountered_species"]),
@@ -522,6 +579,9 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
             row["ranking_score_index_contribution"]
         ),
         "legacyContribution": float(row["score_index_contribution"]),
+        "isBestAnnualFamilyContext": bool(
+            row.get("is_best_annual_family_context", False)
+        ),
     }
 
 def serialize_context(
@@ -556,6 +616,101 @@ def serialize_context(
         "allTargetsText": str(row["all_targets"]),
         "targets": [serialize_target(target) for target in targets],
     }
+
+
+def build_best_spot_entries(
+    ranking_rows: list[dict[str, Any]],
+    target_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build one dedicated annual-best row per evolution family.
+
+    The annual winner marker is calculated independently from the currently
+    selected recommendation seasons. The displayed score is the expected score
+    contribution of that single evolution family, not the total score of every
+    target at the route context.
+    """
+    ranking_by_context = {
+        str(row["context_id"]): row
+        for row in ranking_rows
+    }
+    winners = [
+        row
+        for row in target_rows
+        if bool(row.get("is_best_annual_family_context", False))
+    ]
+
+    best_spots: list[dict[str, Any]] = []
+    seen_families: set[str] = set()
+    for target in winners:
+        family = str(target["scoring_family"])
+        family_key = name_key(family)
+        if family_key in seen_families:
+            raise ValueError(
+                f"More than one annual best target was marked for {family!r}"
+            )
+        seen_families.add(family_key)
+
+        source_context_id = str(target["context_id"])
+        context = ranking_by_context.get(source_context_id)
+        if context is None:
+            raise ValueError(
+                f"Annual best target for {family!r} references missing context "
+                f"{source_context_id!r}"
+            )
+
+        serialized_target = serialize_target(target)
+        best_spot_id = f"best::{family_key}"
+        check_weight = (
+            float(target["horde_roll_probability"])
+            * float(target["weighted_horde_size"])
+        )
+        location_name = str(context["location_display"])
+        best_spots.append({
+            "contextId": best_spot_id,
+            "sourceContextId": source_context_id,
+            "isBestSpotEntry": True,
+            "bestSpotFamily": family,
+            "region": str(context["region"]),
+            "locationId": str(context["location_id"]),
+            "locationName": location_name,
+            "displayName": f"{context['region']} — {location_name}",
+            "encounterType": str(context["encounter_type"]),
+            "season": str(context["season"]),
+            "timeOfDay": str(context["time_of_day"]),
+            "adjustedScore": float(target["ranking_score_index_contribution"]),
+            "legacyScore": float(target["score_index_contribution"]),
+            "expectedChecks": check_weight,
+            "newUniqueSharePercent": float(
+                target["shiny_check_share_percent"]
+            ),
+            "topTarget": str(target["encountered_species"]),
+            "topTargetFamily": family,
+            "topTargetPoints": float(target["effective_points_if_shiny"]),
+            "topTargetProbabilityPercent": float(
+                target["horde_roll_probability_percent"]
+            ),
+            "topTargetScoreMultiplier": float(
+                target["family_temporal_score_multiplier"]
+            ),
+            "fallbackTarget": "",
+            "fallbackPoints": None,
+            "allTargetsText": (
+                f"{target['encountered_species']} {family}"
+            ),
+            "targets": [serialized_target],
+        })
+
+    best_spots.sort(
+        key=lambda row: (
+            -float(row["adjustedScore"]),
+            -float(row["topTargetProbabilityPercent"]),
+            str(row["bestSpotFamily"]).casefold(),
+            str(row["displayName"]).casefold(),
+            SEASONS.index(str(row["season"])),
+            TIMES.index(str(row["timeOfDay"])),
+        )
+    )
+    return best_spots
 
 
 def build_views(
@@ -706,6 +861,7 @@ def build_payload(
         recommendation_scope["eligibleSeasons"],
     )
     family_sets = context_family_sets(scoped_by_context)
+    full_year_family_sets = context_family_sets(model["by_context"])
     unique_bonus = float(config.get("unique_species_bonus", 8))
     duplicate_points = float(config.get("duplicate_points", 1))
     exclusion_enabled = bool(config.get("exclude_player_context_if_any_target_family_caught", True))
@@ -719,19 +875,42 @@ def build_payload(
         False,
         family_sets,
     )
+    _, annual_team_targets, _ = rank_for_state(
+        model["by_context"],
+        team_families,
+        set(),
+        unique_bonus,
+        duplicate_points,
+        False,
+        full_year_family_sets,
+    )
+    _, best_annual_context_by_family = annotate_best_annual_family_contexts(
+        annual_team_targets
+    )
+    team_targets, _ = annotate_best_annual_family_contexts(
+        team_targets,
+        best_annual_context_by_family,
+    )
+    team_bundle = build_views(
+        team_rankings,
+        team_targets,
+        recommendation_scope["eligibleSeasons"],
+    )
+    team_bundle["bestSpots"] = build_best_spot_entries(
+        team_rankings,
+        team_targets,
+    )
+
+    active_players = tuple(sorted(normalized.players, key=str.casefold))
     rankings: dict[str, Any] = {
-        "team": build_views(
-            team_rankings,
-            team_targets,
-            recommendation_scope["eligibleSeasons"],
-        ),
+        "team": team_bundle,
         "players": {},
     }
     player_summaries: list[dict[str, Any]] = []
     active = active_season(config, calculation_at)
     game_time_at_build, active_time_of_day = current_game_clock(config, calculation_at)
 
-    for player in normalized.players:
+    for player in active_players:
         player_rankings, player_targets, excluded_count = rank_for_state(
             scoped_by_context,
             team_families,
@@ -741,10 +920,32 @@ def build_payload(
             exclusion_enabled,
             family_sets,
         )
+        _, annual_player_targets, _ = rank_for_state(
+            model["by_context"],
+            team_families,
+            player_families[player],
+            unique_bonus,
+            duplicate_points,
+            exclusion_enabled,
+            full_year_family_sets,
+        )
+        _, player_best_annual_context_by_family = (
+            annotate_best_annual_family_contexts(
+                annual_player_targets
+            )
+        )
+        player_targets, _ = annotate_best_annual_family_contexts(
+            player_targets,
+            player_best_annual_context_by_family,
+        )
         views = build_views(
             player_rankings,
             player_targets,
             recommendation_scope["eligibleSeasons"],
+        )
+        views["bestSpots"] = build_best_spot_entries(
+            player_rankings,
+            player_targets,
         )
         rankings["players"][player] = views
         default_key = f"{active}|{active_time_of_day}" if active != "All" else f"All|{active_time_of_day}"
@@ -781,7 +982,7 @@ def build_payload(
             "remainingTemporalCombinationUniverse": len(
                 recommendation_scope["eligibleSeasons"]
             ) * len(TIMES),
-            "playerCount": len(normalized.players),
+            "playerCount": len(active_players),
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
             "sweetScentContextCount": model["diagnostics"].get(
@@ -789,6 +990,12 @@ def build_payload(
             ),
             "fixedProbabilityOverrideContextCount": model["diagnostics"].get(
                 "fixed_probability_override_context_count", 0
+            ),
+            "annualBestFamilyMarkerCount": len(
+                best_annual_context_by_family
+            ),
+            "annualBestSpotCount": len(
+                rankings["team"].get("bestSpots", [])
             ),
             "rankingMode": "temporal_exclusivity",
             "scoreAdjustmentByCombinationCount": {
@@ -808,7 +1015,7 @@ def build_payload(
             ),
             "warnings": list(normalized.warnings),
         },
-        "players": list(normalized.players),
+        "players": list(active_players),
         "rankings": rankings,
         "teamChecklist": checklist,
         "playerSummary": player_summaries,
@@ -828,7 +1035,7 @@ def build_payload(
         ["Recommendation scope phase", recommendation_scope["phase"]],
         ["Active in-game time window", active_time_of_day],
         ["In-game time at build", game_time_at_build],
-        ["Active players", len(normalized.players)],
+        ["Active players", len(active_players)],
         ["Team caught evolution families", len(team_families)],
         ["Ranked route contexts", model["diagnostics"]["context_count"]],
         ["Recommended remaining contexts", len(rankings["team"]["views"].get("All|All", []))],

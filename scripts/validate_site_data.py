@@ -94,6 +94,12 @@ def validate_target(target_raw: Any, label: str) -> None:
         f"{label}.adjustedContribution must equal legacyContribution × scoreMultiplier",
     )
 
+    marker = target.get("isBestAnnualFamilyContext")
+    require(
+        isinstance(marker, bool),
+        f"{label}.isBestAnnualFamilyContext must be boolean",
+    )
+
 
 def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
     entry = obj(entry_raw, label)
@@ -127,6 +133,110 @@ def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
         close(adjusted_score, sum(float(target["adjustedContribution"]) for target in targets)),
         f"{label}.adjustedScore does not match target contributions",
     )
+
+
+def validate_best_spots(
+    best_spots_raw: Any,
+    entries: dict[str, Any],
+    marker_contexts: dict[str, str],
+    label: str,
+) -> list[dict[str, Any]]:
+    best_spots = array(best_spots_raw, label)
+    require(
+        len(best_spots) == len(marker_contexts),
+        f"{label} must contain exactly one row per annual-best evolution family",
+    )
+
+    seen_families: set[str] = set()
+    previous_score: float | None = None
+    for index, best_raw in enumerate(best_spots):
+        best = obj(best_raw, f"{label}[{index}]")
+        best_id = str(best.get("contextId", ""))
+        require(best_id, f"{label}[{index}].contextId is empty")
+        validate_entry(best_id, best, f"{label}[{index}]")
+        require(
+            best.get("isBestSpotEntry") is True,
+            f"{label}[{index}].isBestSpotEntry must be true",
+        )
+
+        source_context_id = str(best.get("sourceContextId", ""))
+        require(
+            source_context_id in entries,
+            f"{label}[{index}] references missing source context {source_context_id!r}",
+        )
+        source = entries[source_context_id]
+        for field in (
+            "region",
+            "locationId",
+            "encounterType",
+            "season",
+            "timeOfDay",
+        ):
+            require(
+                best.get(field) == source.get(field),
+                f"{label}[{index}].{field} does not match its source context",
+            )
+
+        targets = best["targets"]
+        require(
+            len(targets) == 1,
+            f"{label}[{index}] must contain exactly one evolution-family target",
+        )
+        target = targets[0]
+        family = str(target["family"])
+        require(
+            target["isBestAnnualFamilyContext"] is True,
+            f"{label}[{index}] target must carry the annual-best marker",
+        )
+        require(
+            family not in seen_families,
+            f"{label} contains duplicate evolution family {family!r}",
+        )
+        seen_families.add(family)
+        require(
+            best.get("bestSpotFamily") == family,
+            f"{label}[{index}].bestSpotFamily does not match the target family",
+        )
+        require(
+            best.get("topTargetFamily") == family,
+            f"{label}[{index}].topTargetFamily does not match the target family",
+        )
+        require(
+            marker_contexts.get(family) == source_context_id,
+            f"{label}[{index}] does not use the marked annual-best source context",
+        )
+
+        source_marked_targets = [
+            source_target
+            for source_target in source["targets"]
+            if str(source_target["family"]) == family
+            and source_target["isBestAnnualFamilyContext"]
+        ]
+        require(
+            len(source_marked_targets) == 1,
+            f"{label}[{index}] source context does not contain exactly one matching marker",
+        )
+        require(
+            close(
+                float(target["adjustedContribution"]),
+                float(source_marked_targets[0]["adjustedContribution"]),
+            ),
+            f"{label}[{index}] score differs from its marked source target",
+        )
+
+        score = number(best.get("adjustedScore"), f"{label}[{index}].adjustedScore")
+        if previous_score is not None:
+            require(
+                score <= previous_score + TOLERANCE,
+                f"{label} is not sorted by descending expected contribution",
+            )
+        previous_score = score
+
+    require(
+        seen_families == set(marker_contexts),
+        f"{label} evolution families do not match annual-best markers",
+    )
+    return best_spots
 
 
 def validate_view(
@@ -167,14 +277,53 @@ def validate_bundle(
     eligible_seasons: set[str],
     route_context_count: int,
     recommendation_context_count: int | None = None,
-) -> int:
+    require_complete_annual_markers: bool = False,
+) -> tuple[int, dict[str, str]]:
     bundle = obj(bundle_raw, label)
     entries = obj(bundle.get("entries"), f"{label}.entries")
     views = obj(bundle.get("views"), f"{label}.views")
     require("All|All" in views, f"{label}.views must contain All|All")
 
+    family_targets: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+    marker_contexts: dict[str, str] = {}
     for context_id, entry in entries.items():
         validate_entry(context_id, entry, f"{label}.entries[{context_id!r}]")
+        for target in entry["targets"]:
+            family = str(target["family"])
+            family_targets.setdefault(family, []).append((context_id, target))
+            if target["isBestAnnualFamilyContext"]:
+                require(
+                    family not in marker_contexts,
+                    f"{label} contains more than one annual-best marker for {family!r}",
+                )
+                marker_contexts[family] = context_id
+
+    if require_complete_annual_markers:
+        require(
+            set(marker_contexts) == set(family_targets),
+            f"{label} must contain exactly one annual-best marker per evolution family",
+        )
+
+    for family, context_id in marker_contexts.items():
+        candidates = family_targets[family]
+        marked_target = next(
+            target
+            for candidate_context, target in candidates
+            if candidate_context == context_id
+            and target["isBestAnnualFamilyContext"]
+        )
+        maximum = max(float(target["adjustedContribution"]) for _, target in candidates)
+        require(
+            close(float(marked_target["adjustedContribution"]), maximum),
+            f"{label} annual-best marker for {family!r} is not on a maximum-score context",
+        )
+
+    validate_best_spots(
+        bundle.get("bestSpots"),
+        entries,
+        marker_contexts,
+        f"{label}.bestSpots",
+    )
 
     all_ids: list[str] = []
     for view_name, view_ids in views.items():
@@ -194,7 +343,7 @@ def validate_bundle(
             len(all_ids) == recommendation_context_count,
             f"{label}.All|All has {len(all_ids)} contexts, expected {recommendation_context_count}",
         )
-    return len(all_ids)
+    return len(all_ids), marker_contexts
 
 
 def main() -> None:
@@ -241,26 +390,54 @@ def main() -> None:
             number(meta.get("recommendationContextCount"), "meta.recommendationContextCount")
         )
         rankings = obj(data.get("rankings"), "rankings")
-        team_count = validate_bundle(
+        team_count, team_marker_contexts = validate_bundle(
             rankings.get("team"),
             "rankings.team",
             eligible_seasons=eligible,
             route_context_count=route_count,
             recommendation_context_count=recommendation_count,
+            require_complete_annual_markers=True,
+        )
+
+        expected_marker_count = int(
+            number(
+                meta.get("annualBestFamilyMarkerCount"),
+                "meta.annualBestFamilyMarkerCount",
+            )
+        )
+        require(
+            len(team_marker_contexts) == expected_marker_count,
+            "meta.annualBestFamilyMarkerCount does not match team markers",
+        )
+        expected_best_spot_count = int(
+            number(
+                meta.get("annualBestSpotCount"),
+                "meta.annualBestSpotCount",
+            )
+        )
+        require(
+            expected_best_spot_count == expected_marker_count,
+            "meta.annualBestSpotCount must match annualBestFamilyMarkerCount",
         )
 
         players = array(data.get("players"), "players")
+        require(
+            players == sorted(players, key=lambda value: str(value).casefold()),
+            "players must be sorted alphabetically ascending",
+        )
         player_bundles = obj(rankings.get("players"), "rankings.players")
         require(set(player_bundles) == set(players), "rankings.players does not match players")
-        player_counts = [
+        player_results = [
             validate_bundle(
                 player_bundles[player],
                 f"rankings.players[{player!r}]",
                 eligible_seasons=eligible,
                 route_context_count=route_count,
+                require_complete_annual_markers=True,
             )
             for player in players
         ]
+        player_counts = [count for count, _ in player_results]
     except (ValidationError, json.JSONDecodeError) as exc:
         print(f"Validation failed: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
