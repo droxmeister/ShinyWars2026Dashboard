@@ -85,10 +85,20 @@
   function seasonAt(date, rotation) {
     const order = [...(rotation.seasonOrder || [])];
     const anchorSeason = rotation.anchorSeason;
+    const beforeAnchorSeason = rotation.beforeAnchorSeason;
     const anchorUtc = new Date(rotation.anchorUtc);
     const intervalDays = Number(rotation.intervalDays || 7);
-    if (!order.length || !order.includes(anchorSeason) || Number.isNaN(anchorUtc.getTime()) || intervalDays <= 0) {
+    if (
+      !order.length ||
+      !order.includes(anchorSeason) ||
+      (beforeAnchorSeason && !order.includes(beforeAnchorSeason)) ||
+      Number.isNaN(anchorUtc.getTime()) ||
+      intervalDays <= 0
+    ) {
       throw new Error("Invalid season-rotation configuration");
+    }
+    if (beforeAnchorSeason && date.getTime() < anchorUtc.getTime()) {
+      return beforeAnchorSeason;
     }
     const intervalMs = intervalDays * 24 * 60 * 60 * 1000;
     const steps = Math.floor((date.getTime() - anchorUtc.getTime()) / intervalMs);
