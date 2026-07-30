@@ -81,7 +81,7 @@ class DashboardTests(unittest.TestCase):
             ["Alpha", "beta", "zeta"],
         )
 
-    def test_annual_best_marker_uses_target_contribution_as_context_tiebreaker(self) -> None:
+    def test_annual_best_marker_uses_highest_full_context_score(self) -> None:
         base = {
             "scoring_family": "Test family",
             "region": "Test",
@@ -108,7 +108,7 @@ class DashboardTests(unittest.TestCase):
 
         annotated, mapping = annotate_best_annual_family_contexts(rows)
 
-        self.assertEqual(mapping, {"test family": "higher"})
+        self.assertEqual(mapping, {"test family": ("higher",)})
         self.assertEqual(
             [
                 row["context_id"]
@@ -116,6 +116,49 @@ class DashboardTests(unittest.TestCase):
                 if row["is_best_annual_family_context"]
             ],
             ["higher"],
+        )
+
+    def test_annual_best_marker_marks_all_equal_maxima(self) -> None:
+        base = {
+            "scoring_family": "Tie family",
+            "region": "Test",
+            "encounter_type": "Grass",
+            "season": "Summer",
+            "time_of_day": "day",
+            "weighted_horde_size": 5.0,
+            "horde_roll_probability": 0.5,
+        }
+        rows = [
+            {
+                **base,
+                "context_id": "alpha",
+                "location_display": "Alpha Route",
+                "ranking_score_index_contribution": 50.0,
+            },
+            {
+                **base,
+                "context_id": "beta",
+                "location_display": "Beta Route",
+                "ranking_score_index_contribution": 50.0,
+            },
+            {
+                **base,
+                "context_id": "lower",
+                "location_display": "Lower Route",
+                "ranking_score_index_contribution": 49.0,
+            },
+        ]
+
+        annotated, mapping = annotate_best_annual_family_contexts(rows)
+
+        self.assertEqual(mapping, {"tie family": ("alpha", "beta")})
+        self.assertEqual(
+            {
+                row["context_id"]
+                for row in annotated
+                if row["is_best_annual_family_context"]
+            },
+            {"alpha", "beta"},
         )
 
     def test_annual_best_marker_prefers_higher_full_context_score(self) -> None:
@@ -168,7 +211,7 @@ class DashboardTests(unittest.TestCase):
 
         annotated, mapping = annotate_best_annual_family_contexts(rows)
 
-        self.assertEqual(mapping["magmar"], "pokemon-mansion")
+        self.assertEqual(mapping["magmar"], ("pokemon-mansion",))
         magmar_markers = [
             row["context_id"]
             for row in annotated
@@ -177,7 +220,7 @@ class DashboardTests(unittest.TestCase):
         ]
         self.assertEqual(magmar_markers, ["pokemon-mansion"])
 
-    def test_magmar_star_uses_higher_route_score_in_real_dashboard(self) -> None:
+    def test_magmar_stars_include_all_tied_top_contexts(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha",),
             all_players=("Alpha",),
@@ -200,25 +243,49 @@ class DashboardTests(unittest.TestCase):
             and target["isBestAnnualFamilyContext"]
         ]
 
-        self.assertEqual(len(marked), 1)
-        entry, target = marked[0]
-        self.assertEqual(entry["locationName"], "Pokémon Mansion (3F)")
-        self.assertEqual(target["species"], "Magmar")
-        self.assertAlmostEqual(entry["annualAdjustedScore"], 151.25)
-        self.assertAlmostEqual(target["adjustedContribution"], 118.75)
-
-        burned_tower_scores = [
-            entry["annualAdjustedScore"]
-            for entry in entries.values()
-            if entry["locationName"] == "Burned Tower (B1F)"
-            and any(target["family"] == "Magmar" for target in entry["targets"])
-        ]
-        self.assertTrue(burned_tower_scores)
+        marked_combinations = {
+            (
+                entry["locationName"],
+                entry["season"],
+                entry["timeOfDay"],
+            )
+            for entry, _ in marked
+        }
+        expected_combinations = {
+            (location, "Summer", time_name)
+            for location in (
+                "Pokémon Mansion (3F)",
+                "Stark Mountain (Back Room)",
+            )
+            for time_name in ("morning", "day", "night")
+        }
+        self.assertEqual(marked_combinations, expected_combinations)
         self.assertTrue(
-            all(score < entry["annualAdjustedScore"] for score in burned_tower_scores)
+            all(
+                abs(entry["annualAdjustedScore"] - 151.25) <= 1e-6
+                for entry, _ in marked
+            )
+        )
+        self.assertTrue(
+            all(
+                abs(target["adjustedContribution"] - 118.75) <= 1e-6
+                for _, target in marked
+            )
         )
 
-    def test_exactly_one_annual_best_marker_per_family_and_date_independent(self) -> None:
+        burned_tower = [
+            target
+            for entry in entries.values()
+            if entry["locationName"] == "Burned Tower (B1F)"
+            for target in entry["targets"]
+            if target["family"] == "Magmar"
+        ]
+        self.assertTrue(burned_tower)
+        self.assertTrue(
+            all(not target["isBestAnnualFamilyContext"] for target in burned_tower)
+        )
+
+    def test_all_maximum_annual_best_markers_are_date_independent(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha",),
             all_players=("Alpha",),
@@ -239,8 +306,8 @@ class DashboardTests(unittest.TestCase):
             datetime(2026, 8, 10, tzinfo=timezone.utc),
         )
 
-        def marker_map(payload: dict) -> dict[str, str]:
-            result: dict[str, str] = {}
+        def marker_map(payload: dict) -> dict[str, frozenset[str]]:
+            result: dict[str, set[str]] = {}
             family_targets: dict[str, list[tuple[str, dict]]] = {}
             entries = payload["rankings"]["team"]["entries"]
             for context_id, entry in entries.items():
@@ -249,31 +316,43 @@ class DashboardTests(unittest.TestCase):
                         (context_id, target)
                     )
                     if target["isBestAnnualFamilyContext"]:
-                        self.assertNotIn(target["family"], result)
-                        result[target["family"]] = context_id
+                        result.setdefault(target["family"], set()).add(context_id)
 
             self.assertEqual(set(result), set(family_targets))
-            for family, context_id in result.items():
+            for family, marked_contexts in result.items():
                 candidates = family_targets[family]
-                self.assertAlmostEqual(
-                    entries[context_id]["annualAdjustedScore"],
-                    max(
-                        entries[candidate_context]["annualAdjustedScore"]
-                        for candidate_context, _ in candidates
-                    ),
+                maximum = max(
+                    entries[candidate_context]["annualAdjustedScore"]
+                    for candidate_context, _ in candidates
                 )
+                expected = {
+                    candidate_context
+                    for candidate_context, _ in candidates
+                    if abs(
+                        entries[candidate_context]["annualAdjustedScore"] - maximum
+                    ) <= 1e-6
+                }
+                self.assertEqual(marked_contexts, expected)
+
             self.assertEqual(
                 payload["meta"]["annualBestFamilyMarkerCount"],
                 len(result),
             )
-            return result
+            self.assertEqual(
+                payload["meta"]["annualBestSpotCount"],
+                sum(len(contexts) for contexts in result.values()),
+            )
+            return {
+                family: frozenset(contexts)
+                for family, contexts in result.items()
+            }
 
         self.assertEqual(
             marker_map(before_payload),
             marker_map(after_payload),
         )
 
-    def test_best_spots_contains_one_row_per_annual_family(self) -> None:
+    def test_best_spots_contains_one_row_per_tied_annual_context(self) -> None:
         normalized = NormalizedInput(
             players=("Alpha",),
             all_players=("Alpha",),
@@ -289,20 +368,32 @@ class DashboardTests(unittest.TestCase):
 
         bundle = payload["rankings"]["team"]
         best_spots = bundle["bestSpots"]
-        families = [row["bestSpotFamily"] for row in best_spots]
+        pairs = [
+            (row["bestSpotFamily"], row["sourceContextId"])
+            for row in best_spots
+        ]
+        distinct_families = {family for family, _ in pairs}
 
-        self.assertEqual(len(families), len(set(families)))
+        self.assertEqual(len(pairs), len(set(pairs)))
         self.assertEqual(
-            len(best_spots),
+            len(distinct_families),
             payload["meta"]["annualBestFamilyMarkerCount"],
         )
         self.assertEqual(
             len(best_spots),
             payload["meta"]["annualBestSpotCount"],
         )
+        self.assertGreaterEqual(
+            payload["meta"]["annualBestSpotCount"],
+            payload["meta"]["annualBestFamilyMarkerCount"],
+        )
         self.assertEqual(
             payload["meta"]["annualBestSelectionMode"],
             "full_context_adjusted_score",
+        )
+        self.assertEqual(
+            payload["meta"]["annualBestTieMode"],
+            "all_equal_maxima",
         )
         self.assertEqual(
             [row["adjustedScore"] for row in best_spots],
@@ -353,10 +444,15 @@ class DashboardTests(unittest.TestCase):
             datetime(2026, 8, 10, tzinfo=timezone.utc),
         )
 
-        def winner_map(payload: dict) -> dict[str, str]:
+        def winner_map(payload: dict) -> dict[str, frozenset[str]]:
+            result: dict[str, set[str]] = {}
+            for row in payload["rankings"]["team"]["bestSpots"]:
+                result.setdefault(row["bestSpotFamily"], set()).add(
+                    row["sourceContextId"]
+                )
             return {
-                row["bestSpotFamily"]: row["sourceContextId"]
-                for row in payload["rankings"]["team"]["bestSpots"]
+                family: frozenset(contexts)
+                for family, contexts in result.items()
             }
 
         self.assertEqual(

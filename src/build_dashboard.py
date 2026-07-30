@@ -8,7 +8,7 @@ import os
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from math import floor
+from math import floor, isclose
 from zoneinfo import ZoneInfo
 from pathlib import Path
 from typing import Any, Iterable
@@ -501,76 +501,64 @@ def context_family_sets(by_context: dict[str, list[dict[str, Any]]]) -> dict[str
     }
 
 
-def _annual_target_sort_key(
-    row: dict[str, Any],
-    context_adjusted_scores: dict[str, float],
-) -> tuple[Any, ...]:
-    """Sort annual candidates from best to worst for one evolution family.
-
-    The primary value is the complete adjusted score of the Location / Season /
-    Time context. This makes the star identify the route combination with the
-    highest total expected value, while the target contribution (including the
-    horde split and horde size) remains the first tie-breaker. The remaining
-    values are deterministic so exactly one annual winner is selected.
-    """
-    context_id = str(row["context_id"])
-    season = str(row["season"])
-    time_name = str(row["time_of_day"])
-    return (
-        -float(context_adjusted_scores[context_id]),
-        -float(row["ranking_score_index_contribution"]),
-        -float(row["horde_roll_probability"]),
-        -float(row["weighted_horde_size"]),
-        str(row["region"]).casefold(),
-        str(row["location_display"]).casefold(),
-        str(row["encounter_type"]).casefold(),
-        SEASONS.index(season),
-        TIMES.index(time_name),
-        context_id,
-    )
-
-
 def annotate_best_annual_family_contexts(
     target_rows: list[dict[str, Any]],
-    best_context_by_family: dict[str, str] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, str]]:
-    """Mark exactly one full-year Location/Season/Time winner per family.
+    best_contexts_by_family: dict[str, tuple[str, ...]] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, tuple[str, ...]]]:
+    """Mark every tied full-year maximum per evolution family.
 
-    The winner map is calculated from all annual contexts, not from the current
-    recommendation-season filter. Passing an existing map applies the same
-    global markers to team and player views.
+    Selection is based exclusively on the complete adjusted score of each
+    Location / Season / Time context. When several contexts share the same
+    maximum score for a family, every tied context is marked. The winner map is
+    calculated from all annual contexts, not from the current recommendation
+    season filter. Passing an existing map applies the same global markers to
+    team and player recommendation rows.
     """
-    if best_context_by_family is None:
+    if best_contexts_by_family is None:
         context_adjusted_scores: dict[str, float] = defaultdict(float)
+        contexts_by_family: dict[str, set[str]] = defaultdict(set)
+
         for row in target_rows:
-            context_adjusted_scores[str(row["context_id"])] += float(
+            context_id = str(row["context_id"])
+            family_key = name_key(str(row["scoring_family"]))
+            context_adjusted_scores[context_id] += float(
                 row["ranking_score_index_contribution"]
             )
+            contexts_by_family[family_key].add(context_id)
 
-        best_context_by_family = {}
-        for row in sorted(
-            target_rows,
-            key=lambda candidate: _annual_target_sort_key(
-                candidate,
-                context_adjusted_scores,
-            ),
-        ):
-            family_key = name_key(str(row["scoring_family"]))
-            best_context_by_family.setdefault(
-                family_key,
-                str(row["context_id"]),
+        best_contexts_by_family = {}
+        for family_key, context_ids in contexts_by_family.items():
+            maximum_score = max(
+                context_adjusted_scores[context_id]
+                for context_id in context_ids
             )
+            tied_contexts = tuple(
+                sorted(
+                    context_id
+                    for context_id in context_ids
+                    if isclose(
+                        context_adjusted_scores[context_id],
+                        maximum_score,
+                        rel_tol=1e-12,
+                        abs_tol=1e-9,
+                    )
+                )
+            )
+            if not tied_contexts:
+                raise ValueError(
+                    f"Could not determine an annual best context for {family_key!r}"
+                )
+            best_contexts_by_family[family_key] = tied_contexts
 
     annotated: list[dict[str, Any]] = []
     for target in target_rows:
         row = dict(target)
         family_key = name_key(str(row["scoring_family"]))
-        row["is_best_annual_family_context"] = (
-            best_context_by_family.get(family_key)
-            == str(row["context_id"])
-        )
+        row["is_best_annual_family_context"] = str(
+            row["context_id"]
+        ) in best_contexts_by_family.get(family_key, ())
         annotated.append(row)
-    return annotated, best_context_by_family
+    return annotated, best_contexts_by_family
 
 
 def annotate_annual_context_scores(
@@ -673,12 +661,13 @@ def build_best_spot_entries(
     ranking_rows: list[dict[str, Any]],
     target_rows: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Build one dedicated annual-best row per evolution family.
+    """Build one row for every tied annual-best family context.
 
-    The annual winner marker is calculated independently from the currently
-    selected recommendation seasons. The displayed score is the expected score
-    contribution of that single evolution family, not the total score of every
-    target at the route context.
+    The annual winner markers are calculated independently from the currently
+    selected recommendation seasons. Multiple Location / Season / Time contexts
+    may therefore be returned for one evolution family when their complete
+    annual adjusted context scores are equal. The displayed score remains the
+    expected contribution of that single evolution family.
     """
     ranking_by_context = {
         str(row["context_id"]): row
@@ -691,17 +680,18 @@ def build_best_spot_entries(
     ]
 
     best_spots: list[dict[str, Any]] = []
-    seen_families: set[str] = set()
+    seen_family_contexts: set[tuple[str, str]] = set()
     for target in winners:
         family = str(target["scoring_family"])
         family_key = name_key(family)
-        if family_key in seen_families:
-            raise ValueError(
-                f"More than one annual best target was marked for {family!r}"
-            )
-        seen_families.add(family_key)
-
         source_context_id = str(target["context_id"])
+        family_context = (family_key, source_context_id)
+        if family_context in seen_family_contexts:
+            raise ValueError(
+                f"Duplicate annual best target for {family!r} in "
+                f"context {source_context_id!r}"
+            )
+        seen_family_contexts.add(family_context)
         context = ranking_by_context.get(source_context_id)
         if context is None:
             raise ValueError(
@@ -710,7 +700,7 @@ def build_best_spot_entries(
             )
 
         serialized_target = serialize_target(target)
-        best_spot_id = f"best::{family_key}"
+        best_spot_id = f"best::{family_key}::{source_context_id}"
         check_weight = (
             float(target["horde_roll_probability"])
             * float(target["weighted_horde_size"])
@@ -1063,6 +1053,7 @@ def build_payload(
                 rankings["team"].get("bestSpots", [])
             ),
             "annualBestSelectionMode": "full_context_adjusted_score",
+            "annualBestTieMode": "all_equal_maxima",
             "rankingMode": "temporal_exclusivity",
             "scoreAdjustmentByCombinationCount": {
                 "1": 2.0,
