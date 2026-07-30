@@ -179,6 +179,13 @@ def active_season(config: dict[str, Any], now: datetime) -> str:
         if not order or anchor_season not in order or interval_days <= 0:
             raise ValueError("live_filter.season_rotation is invalid")
         anchor = _rotation_anchor_utc(config)
+        before_anchor_season = str(rotation.get("before_anchor_season", "")).strip()
+        if now.astimezone(timezone.utc) < anchor and before_anchor_season:
+            if before_anchor_season not in order:
+                raise ValueError(
+                    "live_filter.season_rotation.before_anchor_season must be in season_order"
+                )
+            return before_anchor_season
         steps = floor((now.astimezone(timezone.utc) - anchor).total_seconds() / (interval_days * 86400))
         anchor_index = order.index(anchor_season)
         return order[(anchor_index + steps) % len(order)]
@@ -206,6 +213,7 @@ def live_filter_payload(config: dict[str, Any]) -> dict[str, Any]:
             "anchorUtc": anchor_utc.isoformat().replace("+00:00", "Z") if anchor_utc else None,
             "anchorLocal": rotation.get("anchor_local"),
             "anchorSeason": rotation.get("anchor_season"),
+            "beforeAnchorSeason": rotation.get("before_anchor_season"),
             "seasonOrder": rotation.get("season_order", []),
             "intervalDays": float(rotation.get("interval_days", 7)),
         },
@@ -280,6 +288,7 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
         "shinyCheckSharePercent": float(row["shiny_check_share_percent"]),
         "weightedHordeSize": float(row["weighted_horde_size"]),
         "temporalExclusivity": float(row["species_temporal_exclusivity_average"]),
+        "scoreMultiplier": float(row["species_temporal_score_multiplier_average"]),
         "temporalDetails": str(row["species_temporal_exclusivity_details"]),
         "adjustedContribution": float(row["ranking_score_index_contribution"]),
         "legacyContribution": float(row["score_index_contribution"]),
@@ -313,6 +322,7 @@ def serialize_context(
         "topTargetPoints": float(row["top_target_points"]),
         "topTargetProbabilityPercent": float(row["top_target_horde_probability_percent"]),
         "topTargetExclusivity": float(row["top_target_temporal_exclusivity"]),
+        "topTargetScoreMultiplier": float(row["top_target_score_multiplier"]),
         "fallbackTarget": str(row.get("fallback_target", "")),
         "fallbackPoints": float(row["fallback_target_points"]) if row.get("fallback_target_points") not in ("", None) else None,
         "allTargetsText": str(row["all_targets"]),
@@ -362,7 +372,6 @@ def rank_for_state(
     player_families: set[str],
     unique_bonus: float,
     duplicate_points: float,
-    exclusivity_power: float,
     exclude_contexts: bool,
     family_sets_by_context: dict[str, set[str]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
@@ -376,7 +385,6 @@ def rank_for_state(
         by_context,
         state,
         use_temporal_exclusivity=True,
-        exclusivity_power=exclusivity_power,
     )
     if not exclude_contexts or not player_families:
         return rankings, targets, 0
@@ -442,7 +450,6 @@ def build_payload(
     top_n = int(config.get("top_n", 25))
     unique_bonus = float(config.get("unique_species_bonus", 8))
     duplicate_points = float(config.get("duplicate_points", 1))
-    exclusivity_power = float(config.get("temporal_exclusivity_weight_power", 1.0))
     exclusion_enabled = bool(config.get("exclude_player_context_if_any_target_family_caught", True))
 
     team_rankings, team_targets, _ = rank_for_state(
@@ -451,7 +458,6 @@ def build_payload(
         set(),
         unique_bonus,
         duplicate_points,
-        exclusivity_power,
         False,
         family_sets,
     )
@@ -470,7 +476,6 @@ def build_payload(
             player_families[player],
             unique_bonus,
             duplicate_points,
-            exclusivity_power,
             exclusion_enabled,
             family_sets,
         )
@@ -506,7 +511,12 @@ def build_payload(
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
             "rankingMode": "temporal_exclusivity",
-            "exclusivityPower": exclusivity_power,
+            "exclusivityScoring": {
+                "12": 2.0,
+                "6": 1.5,
+                "4": 1.5,
+                "default": 1.0,
+            },
             "uniqueSpeciesBonus": unique_bonus,
             "duplicatePoints": duplicate_points,
             "playerContextExclusionEnabled": exclusion_enabled,
