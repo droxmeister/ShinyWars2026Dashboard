@@ -287,9 +287,7 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
         "hordeProbabilityPercent": float(row["horde_roll_probability_percent"]),
         "shinyCheckSharePercent": float(row["shiny_check_share_percent"]),
         "weightedHordeSize": float(row["weighted_horde_size"]),
-        "temporalExclusivity": float(row["species_temporal_exclusivity_average"]),
         "scoreMultiplier": float(row["species_temporal_score_multiplier_average"]),
-        "temporalDetails": str(row["species_temporal_exclusivity_details"]),
         "adjustedContribution": float(row["ranking_score_index_contribution"]),
         "legacyContribution": float(row["score_index_contribution"]),
     }
@@ -321,7 +319,6 @@ def serialize_context(
         "topTargetFamily": str(row["top_target_family"]),
         "topTargetPoints": float(row["top_target_points"]),
         "topTargetProbabilityPercent": float(row["top_target_horde_probability_percent"]),
-        "topTargetExclusivity": float(row["top_target_temporal_exclusivity"]),
         "topTargetScoreMultiplier": float(row["top_target_score_multiplier"]),
         "fallbackTarget": str(row.get("fallback_target", "")),
         "fallbackPoints": float(row["fallback_target_points"]) if row.get("fallback_target_points") not in ("", None) else None,
@@ -511,10 +508,11 @@ def build_payload(
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
             "rankingMode": "temporal_exclusivity",
-            "exclusivityScoring": {
-                "12": 2.0,
-                "6": 1.5,
-                "4": 1.5,
+            "scoreAdjustmentByCombinationCount": {
+                "1": 2.0,
+                "2": 1.5,
+                "3": 1.25,
+                "4": 1.1,
                 "default": 1.0,
             },
             "uniqueSpeciesBonus": unique_bonus,

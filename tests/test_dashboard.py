@@ -20,6 +20,7 @@ from src.horde_core import (
     ScoringState,
     aggregate_context_targets,
     temporal_exclusivity_score_multiplier,
+    temporal_score_multiplier,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -64,6 +65,17 @@ class DashboardTests(unittest.TestCase):
         self.assertIn("liveFilter", payload["meta"])
         self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Summer")
         self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["beforeAnchorSeason"], "Autumn")
+        self.assertEqual(
+            payload["meta"]["scoreAdjustmentByCombinationCount"],
+            {"1": 2.0, "2": 1.5, "3": 1.25, "4": 1.1, "default": 1.0},
+        )
+
+        team_entry = next(iter(payload["rankings"]["team"]["entries"].values()))
+        self.assertNotIn("topTargetExclusivity", team_entry)
+        self.assertIn("topTargetScoreMultiplier", team_entry)
+        self.assertNotIn("temporalExclusivity", team_entry["targets"][0])
+        self.assertNotIn("temporalDetails", team_entry["targets"][0])
+        self.assertIn("scoreMultiplier", team_entry["targets"][0])
 
     def test_weekly_season_rotation_uses_configured_local_anchor(self):
         self.assertEqual(
@@ -83,15 +95,21 @@ class DashboardTests(unittest.TestCase):
             "Autumn",
         )
 
-    def test_capped_temporal_exclusivity_score_multipliers(self):
+    def test_temporal_score_multipliers_use_combination_count(self):
+        self.assertEqual(temporal_score_multiplier(1), 2.0)
+        self.assertEqual(temporal_score_multiplier(2), 1.5)
+        self.assertEqual(temporal_score_multiplier(3), 1.25)
+        self.assertEqual(temporal_score_multiplier(4), 1.1)
+        self.assertEqual(temporal_score_multiplier(5), 1.0)
+        self.assertEqual(temporal_score_multiplier(12), 1.0)
+
+        # Backward-compatible wrapper still derives the same values.
         self.assertEqual(temporal_exclusivity_score_multiplier(12), 2.0)
         self.assertEqual(temporal_exclusivity_score_multiplier(6), 1.5)
-        self.assertEqual(temporal_exclusivity_score_multiplier(4), 1.5)
-        self.assertEqual(temporal_exclusivity_score_multiplier(3), 1.0)
-        self.assertEqual(temporal_exclusivity_score_multiplier(2), 1.0)
-        self.assertEqual(temporal_exclusivity_score_multiplier(1), 1.0)
+        self.assertEqual(temporal_exclusivity_score_multiplier(4), 1.25)
+        self.assertEqual(temporal_exclusivity_score_multiplier(3), 1.1)
 
-    def test_adjusted_contribution_uses_capped_multiplier_not_raw_exclusivity(self):
+    def test_adjusted_contribution_uses_combination_multiplier_not_raw_exclusivity(self):
         state = ScoringState(
             unique_bonus=0.0,
             duplicate_points=1.0,
@@ -123,20 +141,21 @@ class DashboardTests(unittest.TestCase):
             }
 
         expected = {
-            12.0: 2.0,
-            6.0: 1.5,
-            4.0: 1.5,
-            3.0: 1.0,
+            1: 2.0,
+            2: 1.5,
+            3: 1.25,
+            4: 1.1,
+            5: 1.0,
         }
-        for exclusivity, multiplier in expected.items():
+        for combination_count, multiplier in expected.items():
             rows = aggregate_context_targets(
-                [record(exclusivity, int(12 / exclusivity))],
+                [record(12.0 / combination_count, combination_count)],
                 state,
                 use_temporal_exclusivity=True,
             )
             self.assertEqual(len(rows), 1)
             self.assertEqual(rows[0]["score_index_contribution"], 50.0)
-            self.assertEqual(
+            self.assertAlmostEqual(
                 rows[0]["exclusivity_adjusted_score_index_contribution"],
                 50.0 * multiplier,
             )

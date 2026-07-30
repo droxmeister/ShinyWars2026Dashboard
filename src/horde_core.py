@@ -19,13 +19,16 @@ Key rules implemented:
 The legacy score index is proportional to expected event points per Sweet Scent use:
     sum(horde_probability * horde_size * score_if_shiny)
 
-The recommended temporal-exclusivity index keeps the raw exclusivity measure
-``12 / available season-time combinations`` for transparency, but uses a
-deliberately capped scoring bonus:
+The recommended temporal-availability index keeps the raw exclusivity measure
+``12 / available season-time combinations`` internally, but adjusts the legacy
+score with a deliberately capped multiplier based on the number of distinct
+season/time combinations:
 
-- exclusivity 12 -> legacy contribution x2
-- exclusivity 6 or 4 -> legacy contribution x1.5
-- all other exclusivity values -> legacy contribution unchanged
+- 1 combination -> legacy contribution x2
+- 2 combinations -> legacy contribution x1.5
+- 3 combinations -> legacy contribution x1.25
+- 4 combinations -> legacy contribution x1.1
+- 5 or more combinations -> legacy contribution unchanged
 
 The common per-check shiny probability is deliberately omitted because it is
 identical across normal wild horde routes and does not affect route ordering.
@@ -65,14 +68,24 @@ OFFICIAL_RULES_URL = "https://forums.pokemmo.com/index.php?/topic/198507-pokemmo
 RULES_MIRROR_URL = "https://pokemmo.shoutwiki.com/wiki/Event:Shiny_Wars_2026"
 
 
+def temporal_score_multiplier(combination_count: int) -> float:
+    """Return the capped score multiplier for a species' availability count."""
+    count = int(combination_count)
+    return {
+        1: 2.0,
+        2: 1.5,
+        3: 1.25,
+        4: 1.1,
+    }.get(count, 1.0)
+
+
 def temporal_exclusivity_score_multiplier(exclusivity: float) -> float:
-    """Return the capped score multiplier for a temporal exclusivity value."""
+    """Backward-compatible wrapper derived from the raw exclusivity value."""
     value = float(exclusivity)
-    if math.isclose(value, 12.0, abs_tol=1e-9):
-        return 2.0
-    if math.isclose(value, 6.0, abs_tol=1e-9) or math.isclose(value, 4.0, abs_tol=1e-9):
-        return 1.5
-    return 1.0
+    if value <= 0:
+        return 1.0
+    combination_count = round(TOTAL_TEMPORAL_COMBINATIONS / value)
+    return temporal_score_multiplier(combination_count)
 
 
 @dataclass(frozen=True)
@@ -569,8 +582,8 @@ def aggregate_context_targets(
             float(record["horde_roll_probability"])
             * float(record["horde_size"])
             * effective_score
-            * temporal_exclusivity_score_multiplier(
-                float(record["species_temporal_exclusivity"])
+            * temporal_score_multiplier(
+                int(record["species_temporal_combination_count"])
             )
             for record in family_records
         )
@@ -590,8 +603,8 @@ def aggregate_context_targets(
                 str(record["pokemon"]),
                 int(record["species_temporal_combination_count"]),
                 float(record["species_temporal_exclusivity"]),
-                temporal_exclusivity_score_multiplier(
-                    float(record["species_temporal_exclusivity"])
+                temporal_score_multiplier(
+                    int(record["species_temporal_combination_count"])
                 ),
             )
             for record in family_records
@@ -683,8 +696,8 @@ def rank_contexts(
             float(record["horde_roll_probability"])
             * float(record["horde_size"])
             * float(record["base_points"])
-            * temporal_exclusivity_score_multiplier(
-                float(record["species_temporal_exclusivity"])
+            * temporal_score_multiplier(
+                int(record["species_temporal_combination_count"])
             )
             for record in records
         )
@@ -1059,7 +1072,7 @@ def rule_source_rows() -> list[dict[str, Any]]:
         },
         {
             "rule": "Temporal exclusivity strategy weight",
-            "value": "Species exclusivity = 12 / distinct season-time combinations; score multiplier is x2 at exclusivity 12, x1.5 at exclusivity 6 or 4, otherwise x1",
+            "value": "Score multiplier by distinct season-time combinations: 1 -> x2, 2 -> x1.5, 3 -> x1.25, 4 -> x1.1, 5+ -> x1",
             "source_url": "User-provided strategy requirement",
         },
     ]
@@ -1143,19 +1156,20 @@ Legacy backup:
 
 `Legacy score index = Σ(horde probability × horde size × score if shiny)`
 
-Recommended temporal-exclusivity strategy:
+Recommended temporal-availability strategy:
 
-`Availability quotient = distinct season/time combinations ÷ 12`
+`Adjusted score index = Σ(legacy target contribution × availability score multiplier)`
 
-`Temporal exclusivity = 1 ÷ availability quotient = 12 ÷ distinct combinations`
+The score multiplier is based on distinct season/time combinations:
 
-`Adjusted score index = Σ(legacy target contribution × capped exclusivity score multiplier)`
+- `1` combination → `×2`
+- `2` combinations → `×1.5`
+- `3` combinations → `×1.25`
+- `4` combinations → `×1.1`
+- `5` or more combinations → `×1`
 
-The score multiplier is:
-
-- exclusivity `12` (one combination) → `×2`
-- exclusivity `6` or `4` (two or three combinations) → `×1.5`
-- all other exclusivity values → `×1`
+The raw exclusivity value (`12 ÷ distinct combinations`) remains available in
+analysis exports, but is not part of the public dashboard display.
 
 This index is proportional to expected Shiny Wars points per Sweet Scent activation. The common per-check shiny probability is omitted because it does not change the ordering of normal wild horde routes.
 
@@ -1407,11 +1421,12 @@ def main() -> None:
             "possible_combinations": TOTAL_TEMPORAL_COMBINATIONS,
             "formula": "12 / distinct season-time combinations for each encountered species",
             "availability_quotient": "distinct season-time combinations / 12",
-            "score_formula": "legacy contribution x2 at exclusivity 12; x1.5 at exclusivity 6 or 4; otherwise unchanged",
-            "score_multipliers": {
-                "12": 2.0,
-                "6": 1.5,
-                "4": 1.5,
+            "score_formula": "legacy contribution x2 for 1 combination; x1.5 for 2; x1.25 for 3; x1.1 for 4; otherwise unchanged",
+            "score_multipliers_by_combination_count": {
+                "1": 2.0,
+                "2": 1.5,
+                "3": 1.25,
+                "4": 1.1,
                 "default": 1.0,
             },
             "scoring_level": "encountered species; evolution-family availability is exported for reference",
