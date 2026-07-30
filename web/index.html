@@ -10,7 +10,7 @@
 <body>
   <header class="hero">
     <div>
-      <p class="eyebrow">TEAM PHASE TO FACE · SHINY WARS 2026</p>
+      <p class="eyebrow">TEAM UXIE · SHINY WARS 2026</p>
       <h1>Horde Strategy Dashboard</h1>
       <p class="subtitle">Live team and player-specific Top 100 spots, recalculated from the shared catch checklist.</p>
     </div>
@@ -96,8 +96,9 @@
 
     <section id="methodPanel" class="card method-panel" hidden>
       <h2>Scoring model</h2>
-      <p><strong>Adjusted contribution</strong> = Sweet Scent horde probability × horde size × current event points × temporal exclusivity.</p>
+      <p><strong>Adjusted contribution</strong> = Sweet Scent horde probability × horde size × current event points × capped exclusivity score multiplier.</p>
       <p>Temporal exclusivity is <strong>12 ÷ the number of season/time combinations</strong> in which the encountered species is available.</p>
+      <p>The score multiplier is <strong>×2</strong> at exclusivity 12, <strong>×1.5</strong> at exclusivity 6 or 4, and <strong>×1</strong> for every other exclusivity value.</p>
       <p>With live filtering enabled, the dashboard automatically uses the current event season and PokeMMO time window. Disable it to use the manual Season and Time selectors.</p>
       <p>For player views, a route context is excluded when that player has already caught any scoring evolution family available in the context. This rule is configurable in <code>config/dashboard_config.json</code>.</p>
       <p>All calculations use <code>location_id</code> as the authoritative map key. The route or location name is shown for readability; repeated names include their Location ID.</p>
