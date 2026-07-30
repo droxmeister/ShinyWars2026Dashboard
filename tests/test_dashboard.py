@@ -16,6 +16,11 @@ from src.build_dashboard import (
     rank_for_state,
     resolve_catch_families,
 )
+from src.horde_core import (
+    ScoringState,
+    aggregate_context_targets,
+    temporal_exclusivity_score_multiplier,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -51,13 +56,14 @@ class DashboardTests(unittest.TestCase):
             self.config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
-        self.assertEqual(payload["meta"]["activeSeason"], "Winter")
+        self.assertEqual(payload["meta"]["activeSeason"], "Summer")
         self.assertEqual(payload["players"], ["Alpha", "Beta"])
         expected_top_n = int(self.config["top_n"])
         self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]), expected_top_n)
-        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Winter|All"]), expected_top_n)
+        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Summer|All"]), expected_top_n)
         self.assertIn("liveFilter", payload["meta"])
-        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Winter")
+        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Summer")
+        self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["beforeAnchorSeason"], "Autumn")
 
     def test_weekly_season_rotation_uses_configured_local_anchor(self):
         self.assertEqual(
@@ -65,13 +71,75 @@ class DashboardTests(unittest.TestCase):
             "Autumn",
         )
         self.assertEqual(
+            active_season(self.config, datetime(2026, 7, 31, 22, 0, tzinfo=timezone.utc)),
+            "Autumn",
+        )
+        self.assertEqual(
             active_season(self.config, datetime(2026, 7, 31, 22, 1, tzinfo=timezone.utc)),
-            "Winter",
+            "Summer",
         )
         self.assertEqual(
             active_season(self.config, datetime(2026, 8, 7, 22, 1, tzinfo=timezone.utc)),
-            "Spring",
+            "Autumn",
         )
+
+    def test_capped_temporal_exclusivity_score_multipliers(self):
+        self.assertEqual(temporal_exclusivity_score_multiplier(12), 2.0)
+        self.assertEqual(temporal_exclusivity_score_multiplier(6), 1.5)
+        self.assertEqual(temporal_exclusivity_score_multiplier(4), 1.5)
+        self.assertEqual(temporal_exclusivity_score_multiplier(3), 1.0)
+        self.assertEqual(temporal_exclusivity_score_multiplier(2), 1.0)
+        self.assertEqual(temporal_exclusivity_score_multiplier(1), 1.0)
+
+    def test_adjusted_contribution_uses_capped_multiplier_not_raw_exclusivity(self):
+        state = ScoringState(
+            unique_bonus=0.0,
+            duplicate_points=1.0,
+            team_caught_families=frozenset(),
+            player_caught_families=frozenset(),
+        )
+
+        def record(exclusivity: float, combination_count: int) -> dict:
+            return {
+                "context_id": "test",
+                "region_id": 1,
+                "region": "Test",
+                "location_id": 1,
+                "location_full": "Test Route",
+                "location_display": "Test Route",
+                "location_name_instance_count": 1,
+                "location_name_requires_id": False,
+                "encounter_type": "Horde",
+                "season": "Summer",
+                "time_of_day": "day",
+                "scoring_family": "Testmon",
+                "pokemon": "Testmon",
+                "tier": 1,
+                "base_points": 10.0,
+                "horde_roll_probability": 1.0,
+                "horde_size": 5,
+                "species_temporal_combination_count": combination_count,
+                "species_temporal_exclusivity": exclusivity,
+            }
+
+        expected = {
+            12.0: 2.0,
+            6.0: 1.5,
+            4.0: 1.5,
+            3.0: 1.0,
+        }
+        for exclusivity, multiplier in expected.items():
+            rows = aggregate_context_targets(
+                [record(exclusivity, int(12 / exclusivity))],
+                state,
+                use_temporal_exclusivity=True,
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["score_index_contribution"], 50.0)
+            self.assertEqual(
+                rows[0]["exclusivity_adjusted_score_index_contribution"],
+                50.0 * multiplier,
+            )
 
     def test_game_clock_and_time_windows(self):
         self.assertEqual(
@@ -106,7 +174,6 @@ class DashboardTests(unittest.TestCase):
             team_families,
             player_families["Alpha"],
             8.0,
-            1.0,
             1.0,
             True,
             context_family_sets(self.model["by_context"]),
