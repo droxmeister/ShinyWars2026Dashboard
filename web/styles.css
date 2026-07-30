@@ -203,3 +203,25 @@ footer { display: flex; justify-content: space-between; color: var(--muted); fon
   color: #7ee2a0;
   border: 1px solid rgba(40, 167, 69, 0.45);
 }
+
+.table-sort-button {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+  font-weight: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
+.table-sort-button:hover,
+.table-sort-button:focus-visible {
+  color: #73e4f5;
+}
+
+.table-sort-button.is-active {
+  color: #73e4f5;
+}

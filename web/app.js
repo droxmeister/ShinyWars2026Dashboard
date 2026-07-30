@@ -11,6 +11,8 @@ const state = {
   liveTimeLabel: "—",
   gameTime: "—",
   search: "",
+  sortBy: "adjustedScore",
+  sortDirection: "desc",
   visibleCount: PAGE_SIZE,
   clockTimer: null,
 };
@@ -42,6 +44,8 @@ const els = {
   loadMoreContainer: null,
   resultCount: null,
   loadMoreButton: null,
+  sortAdjustedScore: document.querySelector("#sortAdjustedScore"),
+  sortHordeChance: document.querySelector("#sortHordeChance"),
 };
 
 function formatNumber(value, digits = 1) {
@@ -158,24 +162,221 @@ function searchableText(row) {
     .toLocaleLowerCase();
 }
 
-function filteredCurrentRows() {
-  const allRows = currentViews();
+function matchingTargetForSearch(row) {
   const query = state.search
     .trim()
     .toLocaleLowerCase();
 
-  return allRows
-    .map((row, index) => ({
-      row,
-      rank: index + 1,
-    }))
-    .filter(({ row }) => {
+  if (
+    !query ||
+    !Array.isArray(row.targets)
+  ) {
+    return null;
+  }
+
+  return (
+    row.targets.find((target) => {
+      const species = String(
+        target.species ?? ""
+      ).toLocaleLowerCase();
+
+      const family = String(
+        target.family ?? ""
+      ).toLocaleLowerCase();
+
+      return (
+        species.includes(query) ||
+        family.includes(query)
+      );
+    }) || null
+  );
+}
+
+
+/*
+ * Bei einer Pokémon-Suche wird die Horde Chance
+ * des gefundenen Pokémon verwendet.
+ *
+ * Ohne Pokémon-Suche bleibt es die Chance
+ * des Top Targets.
+ */
+function displayedHordeChance(row) {
+  const matchingTarget =
+    matchingTargetForSearch(row);
+
+  const value =
+    matchingTarget
+      ?.hordeProbabilityPercent ??
+    row.topTargetProbabilityPercent ??
+    0;
+
+  const chance = Number(value);
+
+  return Number.isFinite(chance)
+    ? chance
+    : 0;
+}
+
+
+function setSort(sortBy) {
+  if (state.sortBy === sortBy) {
+    state.sortDirection =
+      state.sortDirection === "desc"
+        ? "asc"
+        : "desc";
+  } else {
+    state.sortBy = sortBy;
+    state.sortDirection = "desc";
+  }
+
+  resetVisibleCount();
+  render();
+}
+
+
+function updateSortButtons() {
+  const scoreActive =
+    state.sortBy === "adjustedScore";
+
+  const chanceActive =
+    state.sortBy === "hordeChance";
+
+  const directionSymbol =
+    state.sortDirection === "desc"
+      ? "↓"
+      : "↑";
+
+  if (els.sortAdjustedScore) {
+    els.sortAdjustedScore.textContent =
+      scoreActive
+        ? `Adjusted Score ${directionSymbol}`
+        : "Adjusted Score";
+
+    els.sortAdjustedScore.classList.toggle(
+      "is-active",
+      scoreActive
+    );
+
+    els.sortAdjustedScore.setAttribute(
+      "aria-pressed",
+      String(scoreActive)
+    );
+  }
+
+  if (els.sortHordeChance) {
+    els.sortHordeChance.textContent =
+      chanceActive
+        ? `Horde Chance ${directionSymbol}`
+        : "Horde Chance";
+
+    els.sortHordeChance.classList.toggle(
+      "is-active",
+      chanceActive
+    );
+
+    els.sortHordeChance.setAttribute(
+      "aria-pressed",
+      String(chanceActive)
+    );
+  }
+}
+
+function filteredCurrentRows() {
+  const allRows = currentViews();
+
+  const query = state.search
+    .trim()
+    .toLocaleLowerCase();
+
+  const filteredRows =
+    allRows.filter((row) => {
       if (!query) {
         return true;
       }
 
-      return searchableText(row).includes(query);
+      return searchableText(row).includes(
+        query
+      );
     });
+
+  const sortableRows =
+    filteredRows.map((row) => {
+      return {
+        row,
+        hordeChance:
+          displayedHordeChance(row),
+      };
+    });
+
+  sortableRows.sort((left, right) => {
+    let comparison = 0;
+
+    if (state.sortBy === "hordeChance") {
+      comparison =
+        left.hordeChance -
+        right.hordeChance;
+
+      // Bei identischer Chance gewinnt
+      // der höhere Score.
+      if (Math.abs(comparison) < 1e-9) {
+        comparison =
+          Number(
+            left.row.adjustedScore
+          ) -
+          Number(
+            right.row.adjustedScore
+          );
+      }
+    } else {
+      comparison =
+        Number(
+          left.row.adjustedScore
+        ) -
+        Number(
+          right.row.adjustedScore
+        );
+
+      // Bei identischem Score gewinnt
+      // die höhere Horde Chance.
+      if (Math.abs(comparison) < 1e-9) {
+        comparison =
+          left.hordeChance -
+          right.hordeChance;
+      }
+    }
+
+    if (state.sortDirection === "desc") {
+      comparison *= -1;
+    }
+
+    if (Math.abs(comparison) >= 1e-9) {
+      return comparison;
+    }
+
+    return String(
+      left.row.displayName ?? ""
+    ).localeCompare(
+      String(
+        right.row.displayName ?? ""
+      )
+    );
+  });
+
+  return sortableRows.map(
+    (
+      {
+        row,
+        hordeChance,
+      },
+      index
+    ) => {
+      return {
+        row,
+        rank: index + 1,
+        hordeChance,
+      };
+    }
+  );
 }
 
 function combinationLabelInfo(combinationCount) {
@@ -596,6 +797,7 @@ function refreshLiveContext({
 function rankingRowHtml({
   row,
   rank,
+  hordeChance,
 }) {
   const targets = Array.isArray(row.targets)
     ? row.targets
@@ -729,7 +931,7 @@ function rankingRowHtml({
 
       <td>
         ${formatNumber(
-          row.topTargetProbabilityPercent,
+          hordeChance,
           1
         )}%
       </td>
@@ -830,6 +1032,13 @@ function render() {
   if (!state.data) {
     return;
   }
+
+  function render() {
+  if (!state.data) {
+    return;
+  }
+
+  updateSortButtons();
 
   const allRows = currentViews();
   const filteredRows =
@@ -1101,13 +1310,30 @@ els.liveFilterToggle.addEventListener(
 els.methodButton.addEventListener(
   "click",
   () => {
-    els.methodPanel.hidden =
-      !els.methodPanel.hidden;
+    // Erklärung sichtbar machen, falls sie eingeklappt ist.
+    els.methodPanel.hidden = false;
 
-    els.methodButton.textContent =
-      els.methodPanel.hidden
-        ? "How scoring works"
-        : "Hide scoring method";
+    // Nach dem Einblenden weich zur Erklärung scrollen.
+    window.requestAnimationFrame(() => {
+      els.methodPanel.scrollIntoView({
+        behavior: "smooth",
+        block: "start",
+      });
+    });
+  }
+);
+
+els.sortAdjustedScore?.addEventListener(
+  "click",
+  () => {
+    setSort("adjustedScore");
+  }
+);
+
+els.sortHordeChance?.addEventListener(
+  "click",
+  () => {
+    setSort("hordeChance");
   }
 );
 
