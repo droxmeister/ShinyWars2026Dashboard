@@ -1033,11 +1033,6 @@ function render() {
     return;
   }
 
-  function render() {
-  if (!state.data) {
-    return;
-  }
-
   updateSortButtons();
 
   const allRows = currentViews();
