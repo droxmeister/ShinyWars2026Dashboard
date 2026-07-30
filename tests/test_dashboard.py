@@ -81,7 +81,7 @@ class DashboardTests(unittest.TestCase):
             ["Alpha", "beta", "zeta"],
         )
 
-    def test_annual_best_marker_prefers_higher_score_contribution(self) -> None:
+    def test_annual_best_marker_uses_target_contribution_as_context_tiebreaker(self) -> None:
         base = {
             "scoring_family": "Test family",
             "region": "Test",
@@ -116,6 +116,106 @@ class DashboardTests(unittest.TestCase):
                 if row["is_best_annual_family_context"]
             ],
             ["higher"],
+        )
+
+    def test_annual_best_marker_prefers_higher_full_context_score(self) -> None:
+        def target(
+            *,
+            family: str,
+            context_id: str,
+            location: str,
+            contribution: float,
+        ) -> dict:
+            return {
+                "scoring_family": family,
+                "region": "Test",
+                "location_display": location,
+                "encounter_type": "Inside",
+                "season": "Summer",
+                "time_of_day": "morning",
+                "weighted_horde_size": 5.0,
+                "context_id": context_id,
+                "horde_roll_probability": 0.5,
+                "ranking_score_index_contribution": contribution,
+            }
+
+        rows = [
+            target(
+                family="Magmar",
+                context_id="pokemon-mansion",
+                location="Pokémon Mansion (3F)",
+                contribution=118.75,
+            ),
+            target(
+                family="Ponyta",
+                context_id="pokemon-mansion",
+                location="Pokémon Mansion (3F)",
+                contribution=32.5,
+            ),
+            target(
+                family="Magmar",
+                context_id="burned-tower",
+                location="Burned Tower (B1F)",
+                contribution=118.75,
+            ),
+            target(
+                family="Koffing",
+                context_id="burned-tower",
+                location="Burned Tower (B1F)",
+                contribution=27.5,
+            ),
+        ]
+
+        annotated, mapping = annotate_best_annual_family_contexts(rows)
+
+        self.assertEqual(mapping["magmar"], "pokemon-mansion")
+        magmar_markers = [
+            row["context_id"]
+            for row in annotated
+            if row["scoring_family"] == "Magmar"
+            and row["is_best_annual_family_context"]
+        ]
+        self.assertEqual(magmar_markers, ["pokemon-mansion"])
+
+    def test_magmar_star_uses_higher_route_score_in_real_dashboard(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 2, tzinfo=timezone.utc),
+        )
+
+        entries = payload["rankings"]["team"]["entries"]
+        marked = [
+            (entry, target)
+            for entry in entries.values()
+            for target in entry["targets"]
+            if target["family"] == "Magmar"
+            and target["isBestAnnualFamilyContext"]
+        ]
+
+        self.assertEqual(len(marked), 1)
+        entry, target = marked[0]
+        self.assertEqual(entry["locationName"], "Pokémon Mansion (3F)")
+        self.assertEqual(target["species"], "Magmar")
+        self.assertAlmostEqual(entry["annualAdjustedScore"], 151.25)
+        self.assertAlmostEqual(target["adjustedContribution"], 118.75)
+
+        burned_tower_scores = [
+            entry["annualAdjustedScore"]
+            for entry in entries.values()
+            if entry["locationName"] == "Burned Tower (B1F)"
+            and any(target["family"] == "Magmar" for target in entry["targets"])
+        ]
+        self.assertTrue(burned_tower_scores)
+        self.assertTrue(
+            all(score < entry["annualAdjustedScore"] for score in burned_tower_scores)
         )
 
     def test_exactly_one_annual_best_marker_per_family_and_date_independent(self) -> None:
@@ -155,17 +255,11 @@ class DashboardTests(unittest.TestCase):
             self.assertEqual(set(result), set(family_targets))
             for family, context_id in result.items():
                 candidates = family_targets[family]
-                marked = next(
-                    target
-                    for candidate_context, target in candidates
-                    if candidate_context == context_id
-                    and target["isBestAnnualFamilyContext"]
-                )
                 self.assertAlmostEqual(
-                    marked["adjustedContribution"],
+                    entries[context_id]["annualAdjustedScore"],
                     max(
-                        target["adjustedContribution"]
-                        for _, target in candidates
+                        entries[candidate_context]["annualAdjustedScore"]
+                        for candidate_context, _ in candidates
                     ),
                 )
             self.assertEqual(
@@ -207,6 +301,10 @@ class DashboardTests(unittest.TestCase):
             payload["meta"]["annualBestSpotCount"],
         )
         self.assertEqual(
+            payload["meta"]["annualBestSelectionMode"],
+            "full_context_adjusted_score",
+        )
+        self.assertEqual(
             [row["adjustedScore"] for row in best_spots],
             sorted(
                 [row["adjustedScore"] for row in best_spots],
@@ -222,6 +320,10 @@ class DashboardTests(unittest.TestCase):
             self.assertTrue(target["isBestAnnualFamilyContext"])
             self.assertEqual(row["bestSpotFamily"], target["family"])
             self.assertEqual(row["topTargetFamily"], target["family"])
+            self.assertAlmostEqual(
+                row["annualAdjustedScore"],
+                bundle["entries"][row["sourceContextId"]]["annualAdjustedScore"],
+            )
             self.assertAlmostEqual(
                 row["adjustedScore"],
                 target["adjustedContribution"],

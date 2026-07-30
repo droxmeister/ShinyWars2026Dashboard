@@ -125,6 +125,14 @@ def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
 
     legacy_score = number(entry.get("legacyScore"), f"{label}.legacyScore")
     adjusted_score = number(entry.get("adjustedScore"), f"{label}.adjustedScore")
+    annual_adjusted_score = number(
+        entry.get("annualAdjustedScore"),
+        f"{label}.annualAdjustedScore",
+    )
+    require(
+        annual_adjusted_score >= 0,
+        f"{label}.annualAdjustedScore must not be negative",
+    )
     require(
         close(legacy_score, sum(float(target["legacyContribution"]) for target in targets)),
         f"{label}.legacyScore does not match target contributions",
@@ -223,6 +231,13 @@ def validate_best_spots(
             ),
             f"{label}[{index}] score differs from its marked source target",
         )
+        require(
+            close(
+                float(best["annualAdjustedScore"]),
+                float(source["annualAdjustedScore"]),
+            ),
+            f"{label}[{index}] annual context score differs from its source context",
+        )
 
         score = number(best.get("adjustedScore"), f"{label}[{index}].adjustedScore")
         if previous_score is not None:
@@ -306,16 +321,17 @@ def validate_bundle(
 
     for family, context_id in marker_contexts.items():
         candidates = family_targets[family]
-        marked_target = next(
-            target
-            for candidate_context, target in candidates
-            if candidate_context == context_id
-            and target["isBestAnnualFamilyContext"]
+        maximum_context_score = max(
+            float(entries[candidate_context]["annualAdjustedScore"])
+            for candidate_context, _ in candidates
         )
-        maximum = max(float(target["adjustedContribution"]) for _, target in candidates)
         require(
-            close(float(marked_target["adjustedContribution"]), maximum),
-            f"{label} annual-best marker for {family!r} is not on a maximum-score context",
+            close(
+                float(entries[context_id]["annualAdjustedScore"]),
+                maximum_context_score,
+            ),
+            f"{label} annual-best marker for {family!r} is not on a "
+            "maximum full-context annual score",
         )
 
     validate_best_spots(
@@ -397,6 +413,11 @@ def main() -> None:
             route_context_count=route_count,
             recommendation_context_count=recommendation_count,
             require_complete_annual_markers=True,
+        )
+
+        require(
+            meta.get("annualBestSelectionMode") == "full_context_adjusted_score",
+            "meta.annualBestSelectionMode must be full_context_adjusted_score",
         )
 
         expected_marker_count = int(

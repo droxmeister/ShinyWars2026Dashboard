@@ -501,17 +501,23 @@ def context_family_sets(by_context: dict[str, list[dict[str, Any]]]) -> dict[str
     }
 
 
-def _annual_target_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
-    """Sort targets from best to worst for one evolution family.
+def _annual_target_sort_key(
+    row: dict[str, Any],
+    context_adjusted_scores: dict[str, float],
+) -> tuple[Any, ...]:
+    """Sort annual candidates from best to worst for one evolution family.
 
-    The primary value is the target's expected score contribution, which
-    already includes the horde split and horde size. The remaining values are
-    deterministic tie-breakers so exactly one annual winner is selected even
-    when several contexts have identical expected value.
+    The primary value is the complete adjusted score of the Location / Season /
+    Time context. This makes the star identify the route combination with the
+    highest total expected value, while the target contribution (including the
+    horde split and horde size) remains the first tie-breaker. The remaining
+    values are deterministic so exactly one annual winner is selected.
     """
+    context_id = str(row["context_id"])
     season = str(row["season"])
     time_name = str(row["time_of_day"])
     return (
+        -float(context_adjusted_scores[context_id]),
         -float(row["ranking_score_index_contribution"]),
         -float(row["horde_roll_probability"]),
         -float(row["weighted_horde_size"]),
@@ -520,7 +526,7 @@ def _annual_target_sort_key(row: dict[str, Any]) -> tuple[Any, ...]:
         str(row["encounter_type"]).casefold(),
         SEASONS.index(season),
         TIMES.index(time_name),
-        str(row["context_id"]),
+        context_id,
     )
 
 
@@ -535,8 +541,20 @@ def annotate_best_annual_family_contexts(
     global markers to team and player views.
     """
     if best_context_by_family is None:
+        context_adjusted_scores: dict[str, float] = defaultdict(float)
+        for row in target_rows:
+            context_adjusted_scores[str(row["context_id"])] += float(
+                row["ranking_score_index_contribution"]
+            )
+
         best_context_by_family = {}
-        for row in sorted(target_rows, key=_annual_target_sort_key):
+        for row in sorted(
+            target_rows,
+            key=lambda candidate: _annual_target_sort_key(
+                candidate,
+                context_adjusted_scores,
+            ),
+        ):
             family_key = name_key(str(row["scoring_family"]))
             best_context_by_family.setdefault(
                 family_key,
@@ -553,6 +571,33 @@ def annotate_best_annual_family_contexts(
         )
         annotated.append(row)
     return annotated, best_context_by_family
+
+
+def annotate_annual_context_scores(
+    ranking_rows: list[dict[str, Any]],
+    annual_ranking_rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Attach the full-year context score used by annual best-spot selection."""
+    annual_scores = {
+        str(row["context_id"]): float(
+            row["ranking_score_index_per_sweet_scent"]
+        )
+        for row in annual_ranking_rows
+    }
+
+    annotated: list[dict[str, Any]] = []
+    for ranking in ranking_rows:
+        row = dict(ranking)
+        context_id = str(row["context_id"])
+        if context_id not in annual_scores:
+            raise ValueError(
+                f"Missing annual score for context {context_id!r}"
+            )
+        row["annual_ranking_score_index_per_sweet_scent"] = (
+            annual_scores[context_id]
+        )
+        annotated.append(row)
+    return annotated
 
 
 def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
@@ -603,6 +648,12 @@ def serialize_context(
         "season": str(row["season"]),
         "timeOfDay": str(row["time_of_day"]),
         "adjustedScore": float(row["ranking_score_index_per_sweet_scent"]),
+        "annualAdjustedScore": float(
+            row.get(
+                "annual_ranking_score_index_per_sweet_scent",
+                row["ranking_score_index_per_sweet_scent"],
+            )
+        ),
         "legacyScore": float(row["state_score_index_per_sweet_scent"]),
         "expectedChecks": float(row["expected_checks_per_sweet_scent"]),
         "newUniqueSharePercent": float(row["new_unique_shiny_check_share_percent"]),
@@ -678,6 +729,12 @@ def build_best_spot_entries(
             "season": str(context["season"]),
             "timeOfDay": str(context["time_of_day"]),
             "adjustedScore": float(target["ranking_score_index_contribution"]),
+            "annualAdjustedScore": float(
+                context.get(
+                    "annual_ranking_score_index_per_sweet_scent",
+                    context["ranking_score_index_per_sweet_scent"],
+                )
+            ),
             "legacyScore": float(target["score_index_contribution"]),
             "expectedChecks": check_weight,
             "newUniqueSharePercent": float(
@@ -875,7 +932,7 @@ def build_payload(
         False,
         family_sets,
     )
-    _, annual_team_targets, _ = rank_for_state(
+    annual_team_rankings, annual_team_targets, _ = rank_for_state(
         model["by_context"],
         team_families,
         set(),
@@ -890,6 +947,10 @@ def build_payload(
     team_targets, _ = annotate_best_annual_family_contexts(
         team_targets,
         best_annual_context_by_family,
+    )
+    team_rankings = annotate_annual_context_scores(
+        team_rankings,
+        annual_team_rankings,
     )
     team_bundle = build_views(
         team_rankings,
@@ -920,7 +981,7 @@ def build_payload(
             exclusion_enabled,
             family_sets,
         )
-        _, annual_player_targets, _ = rank_for_state(
+        annual_player_rankings, annual_player_targets, _ = rank_for_state(
             model["by_context"],
             team_families,
             player_families[player],
@@ -937,6 +998,10 @@ def build_payload(
         player_targets, _ = annotate_best_annual_family_contexts(
             player_targets,
             player_best_annual_context_by_family,
+        )
+        player_rankings = annotate_annual_context_scores(
+            player_rankings,
+            annual_player_rankings,
         )
         views = build_views(
             player_rankings,
@@ -997,6 +1062,7 @@ def build_payload(
             "annualBestSpotCount": len(
                 rankings["team"].get("bestSpots", [])
             ),
+            "annualBestSelectionMode": "full_context_adjusted_score",
             "rankingMode": "temporal_exclusivity",
             "scoreAdjustmentByCombinationCount": {
                 "1": 2.0,
