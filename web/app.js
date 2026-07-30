@@ -93,6 +93,7 @@ function targetDetailsHtml(targets) {
           <dt>Horde chance</dt><dd>${formatNumber(target.hordeProbabilityPercent, 1)}%</dd>
           <dt>Weighted horde size</dt><dd>${formatNumber(target.weightedHordeSize, 1)}</dd>
           <dt>Temporal exclusivity</dt><dd>×${formatNumber(target.temporalExclusivity, 2)}</dd>
+          <dt>Score multiplier</dt><dd>×${formatNumber(target.scoreMultiplier, 2)}</dd>
           <dt>Adjusted contribution</dt><dd>${formatNumber(target.adjustedContribution, 1)}</dd>
         </dl>
       </article>`;
@@ -173,7 +174,7 @@ function render() {
         <td><span class="spot-name">${escapeHtml(row.displayName)}</span><span class="location-id">Location ID ${escapeHtml(row.locationId)} · ${escapeHtml(row.encounterType)}</span></td>
         <td>${escapeHtml(windowText)}</td>
         <td class="score">${formatNumber(row.adjustedScore, 1)}<span class="legacy">Legacy ${formatNumber(row.legacyScore, 1)}</span></td>
-        <td><span class="target-name">${escapeHtml(row.topTarget)}</span><div class="target-meta">${formatNumber(row.topTargetPoints, 1)} pts · ×${formatNumber(row.topTargetExclusivity, 2)} exclusivity</div><div class="target-meta"><span class="pill ${topClass}">${topLabel}</span></div></td>
+        <td><span class="target-name">${escapeHtml(row.topTarget)}</span><div class="target-meta">${formatNumber(row.topTargetPoints, 1)} pts · ×${formatNumber(row.topTargetExclusivity, 2)} exclusivity · score ×${formatNumber(row.topTargetScoreMultiplier, 2)}</div><div class="target-meta"><span class="pill ${topClass}">${topLabel}</span></div></td>
         <td>${formatNumber(row.topTargetProbabilityPercent, 1)}%</td>
         <td>${row.fallbackTarget ? `${escapeHtml(row.fallbackTarget)}<div class="target-meta">${formatNumber(row.fallbackPoints, 1)} pts</div>` : "—"}</td>
         <td><button class="details-button" data-context="${escapeHtml(row.contextId)}" aria-expanded="false">Show ${row.targets.length} target${row.targets.length === 1 ? "" : "s"}</button></td>
