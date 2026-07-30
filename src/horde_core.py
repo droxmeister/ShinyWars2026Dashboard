@@ -22,10 +22,14 @@ Key rules implemented:
 The legacy score index is proportional to expected event points per Sweet Scent use:
     sum(horde_probability * horde_size * score_if_shiny)
 
-The recommended temporal-availability index keeps the raw exclusivity measure
-``12 / available season-time combinations`` internally, but adjusts the legacy
-score with a deliberately capped multiplier based on the number of distinct
-season/time combinations:
+The recommended temporal-availability index tracks both the full-year number
+of season/time combinations and the number still available in the configured
+event window. The remaining count is used as the score multiplier input, while
+the full-year count remains the label denominator. After the event, the config
+automatically restores full-year mode.
+
+The legacy score is adjusted with a deliberately capped multiplier based on the
+remaining number of distinct season/time combinations:
 
 - 1 combination -> legacy contribution x2
 - 2 combinations -> legacy contribution x1.5
@@ -543,21 +547,32 @@ def annotate_location_instances(
 
 def annotate_temporal_exclusivity(
     rows: list[dict[str, Any]],
+    eligible_seasons: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
-    """Add the requested season/time exclusivity measure to every horde row.
+    """Annotate full-year and currently remaining Season/Time availability.
 
-    The game has four seasons and three time windows, therefore twelve possible
-    temporal combinations. For each encountered species:
+    ``eligible_seasons`` controls the numerator used by recommendations. The
+    denominator always covers the full four-season year. This keeps historical
+    season views searchable while allowing the recommended ``All`` views and
+    score multipliers to react to seasons that have already expired during the
+    event.
 
-        availability quotient = distinct combinations / 12
-        temporal exclusivity = 1 / quotient = 12 / distinct combinations
-
-    The same information is also calculated for the union of each scoring
-    evolution family. Route scoring uses this family-level union because every
-    member of an evolution family shares the same Shiny Wars score.
+    When ``eligible_seasons`` is omitted, the numerator equals the denominator,
+    which is the permanent full-year mode used before the event and after it.
     """
-    combos_by_species: dict[str, set[tuple[str, str]]] = defaultdict(set)
-    combos_by_family: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    remaining_seasons = tuple(
+        season for season in (eligible_seasons or SEASONS) if season in SEASONS
+    )
+    if not remaining_seasons:
+        remaining_seasons = tuple()
+    if len(set(remaining_seasons)) != len(remaining_seasons):
+        raise ValueError("eligible_seasons contains duplicates")
+
+    remaining_season_set = set(remaining_seasons)
+    total_combos_by_species: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    total_combos_by_family: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    remaining_combos_by_species: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    remaining_combos_by_family: dict[str, set[tuple[str, str]]] = defaultdict(set)
     locations_by_species: dict[str, set[tuple[Any, Any]]] = defaultdict(set)
     species_family: dict[str, str] = {}
     species_tier: dict[str, Any] = {}
@@ -566,9 +581,13 @@ def annotate_temporal_exclusivity(
     for row in rows:
         species = str(row["pokemon"])
         family = str(row["scoring_family"])
-        combo = (str(row["season"]), str(row["time_of_day"]))
-        combos_by_species[species].add(combo)
-        combos_by_family[family].add(combo)
+        season = str(row["season"])
+        combo = (season, str(row["time_of_day"]))
+        total_combos_by_species[species].add(combo)
+        total_combos_by_family[family].add(combo)
+        if season in remaining_season_set:
+            remaining_combos_by_species[species].add(combo)
+            remaining_combos_by_family[family].add(combo)
         locations_by_species[species].add((row["region_id"], row["location_id"]))
         species_family[species] = family
         species_tier[species] = row["tier"]
@@ -577,13 +596,21 @@ def annotate_temporal_exclusivity(
     order = {season: index for index, season in enumerate(SEASONS)}
     time_order = {time_name: index for index, time_name in enumerate(TIMES)}
 
+    def exclusivity(count: int) -> float:
+        return TOTAL_TEMPORAL_COMBINATIONS / count if count > 0 else 0.0
+
     summary_rows: list[dict[str, Any]] = []
-    for species in sorted(combos_by_species):
+    for species in sorted(total_combos_by_species):
         family = species_family[species]
-        species_combos = combos_by_species[species]
-        family_combos = combos_by_family[family]
-        species_count = len(species_combos)
-        family_count = len(family_combos)
+        species_total_combos = total_combos_by_species[species]
+        species_remaining_combos = remaining_combos_by_species[species]
+        family_total_combos = total_combos_by_family[family]
+        family_remaining_combos = remaining_combos_by_family[family]
+        species_total = len(species_total_combos)
+        species_remaining = len(species_remaining_combos)
+        family_total = len(family_total_combos)
+        family_remaining = len(family_remaining_combos)
+
         summary_rows.append({
             "pokemon": species,
             "scoring_family": family,
@@ -591,50 +618,96 @@ def annotate_temporal_exclusivity(
             "base_points": species_base_points[species],
             "first_team_catch_points": species_base_points[species] + DEFAULT_UNIQUE_BONUS,
             "possible_temporal_combinations": TOTAL_TEMPORAL_COMBINATIONS,
-            "species_temporal_combination_count": species_count,
-            "species_temporal_availability_quotient": format_number(species_count / TOTAL_TEMPORAL_COMBINATIONS),
-            "species_temporal_exclusivity": format_number(TOTAL_TEMPORAL_COMBINATIONS / species_count),
+            "eligible_seasons": " | ".join(remaining_seasons),
+            "species_temporal_combination_count": species_remaining,
+            "species_temporal_combination_count_remaining": species_remaining,
+            "species_temporal_combination_count_total": species_total,
+            "species_temporal_availability_quotient": format_number(
+                species_remaining / TOTAL_TEMPORAL_COMBINATIONS
+            ),
+            "species_temporal_exclusivity": format_number(exclusivity(species_remaining)),
             "species_temporal_combinations": " | ".join(
                 f"{season}/{time_name}"
                 for season, time_name in sorted(
-                    species_combos, key=lambda item: (order.get(item[0], 99), time_order.get(item[1], 99))
+                    species_remaining_combos,
+                    key=lambda item: (
+                        order.get(item[0], 99),
+                        time_order.get(item[1], 99),
+                    ),
+                )
+            ),
+            "species_temporal_combinations_total": " | ".join(
+                f"{season}/{time_name}"
+                for season, time_name in sorted(
+                    species_total_combos,
+                    key=lambda item: (
+                        order.get(item[0], 99),
+                        time_order.get(item[1], 99),
+                    ),
                 )
             ),
             "distinct_location_count": len(locations_by_species[species]),
-            "family_temporal_combination_count": family_count,
-            "family_temporal_availability_quotient": format_number(family_count / TOTAL_TEMPORAL_COMBINATIONS),
-            "family_temporal_exclusivity": format_number(TOTAL_TEMPORAL_COMBINATIONS / family_count),
+            "family_temporal_combination_count": family_remaining,
+            "family_temporal_combination_count_remaining": family_remaining,
+            "family_temporal_combination_count_total": family_total,
+            "family_temporal_availability_quotient": format_number(
+                family_remaining / TOTAL_TEMPORAL_COMBINATIONS
+            ),
+            "family_temporal_exclusivity": format_number(exclusivity(family_remaining)),
+            "family_temporal_exclusivity_total": format_number(exclusivity(family_total)),
         })
 
     summary_by_species = {str(row["pokemon"]): row for row in summary_rows}
-    for row in rows:
+    copied_rows: list[dict[str, Any]] = []
+    for source_row in rows:
+        row = dict(source_row)
         metrics = summary_by_species[str(row["pokemon"])]
         for key in (
             "possible_temporal_combinations",
+            "eligible_seasons",
             "species_temporal_combination_count",
+            "species_temporal_combination_count_remaining",
+            "species_temporal_combination_count_total",
             "species_temporal_availability_quotient",
             "species_temporal_exclusivity",
             "family_temporal_combination_count",
+            "family_temporal_combination_count_remaining",
+            "family_temporal_combination_count_total",
             "family_temporal_availability_quotient",
             "family_temporal_exclusivity",
+            "family_temporal_exclusivity_total",
         ):
             row[key] = metrics[key]
+        copied_rows.append(row)
 
-    exclusivity_values = [float(row["species_temporal_exclusivity"]) for row in summary_rows]
-    return rows, summary_rows, {
+    remaining_values = [
+        float(row["species_temporal_exclusivity"])
+        for row in summary_rows
+        if int(row["species_temporal_combination_count_remaining"]) > 0
+    ]
+    return copied_rows, summary_rows, {
         "temporal_combination_universe": TOTAL_TEMPORAL_COMBINATIONS,
+        "temporal_eligible_seasons": list(remaining_seasons),
         "temporal_exclusivity_species_count": len(summary_rows),
-        "maximum_species_temporal_exclusivity": max(exclusivity_values, default=0.0),
-        "minimum_species_temporal_exclusivity": min(exclusivity_values, default=0.0),
+        "maximum_species_temporal_exclusivity": max(remaining_values, default=0.0),
+        "minimum_species_temporal_exclusivity": min(remaining_values, default=0.0),
         "single_combination_species_count": sum(
-            1 for row in summary_rows if int(row["species_temporal_combination_count"]) == 1
+            1
+            for row in summary_rows
+            if int(row["species_temporal_combination_count_remaining"]) == 1
+        ),
+        "expired_species_count": sum(
+            1
+            for row in summary_rows
+            if int(row["species_temporal_combination_count_remaining"]) == 0
         ),
         "all_combinations_species_count": sum(
-            1 for row in summary_rows
-            if int(row["species_temporal_combination_count"]) == TOTAL_TEMPORAL_COMBINATIONS
+            1
+            for row in summary_rows
+            if int(row["species_temporal_combination_count_total"])
+            == TOTAL_TEMPORAL_COMBINATIONS
         ),
     }
-
 
 def context_key(row: dict[str, Any]) -> tuple[Any, ...]:
     return (
@@ -847,7 +920,18 @@ def aggregate_context_targets(
             for record in family_records
         )
 
-        family_combination_count = int(first["family_temporal_combination_count"])
+        family_combination_count = int(
+            first.get(
+                "family_temporal_combination_count_remaining",
+                first["family_temporal_combination_count"],
+            )
+        )
+        family_combination_total = int(
+            first.get(
+                "family_temporal_combination_count_total",
+                family_combination_count,
+            )
+        )
         family_exclusivity = float(first["family_temporal_exclusivity"])
         family_score_multiplier = temporal_score_multiplier(
             family_combination_count
@@ -905,6 +989,8 @@ def aggregate_context_targets(
                 check_weight / horde_probability if horde_probability else 0
             ),
             "family_temporal_combination_count": family_combination_count,
+            "family_temporal_combination_count_remaining": family_combination_count,
+            "family_temporal_combination_count_total": family_combination_total,
             "family_temporal_exclusivity": format_number(
                 family_exclusivity, 6
             ),

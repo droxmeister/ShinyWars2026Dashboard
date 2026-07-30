@@ -53,5 +53,19 @@
       "interval_days": 7,
       "before_anchor_season": "Autumn"
     }
+  },
+  "recommendation_season_scope": {
+    "mode": "remaining_event_seasons",
+    "timezone": "Europe/Berlin",
+    "event_start_local": "2026-08-01T00:01:00",
+    "season_order": [
+      "Summer",
+      "Autumn",
+      "Winter",
+      "Spring"
+    ],
+    "interval_days": 7,
+    "before_event_mode": "full_event",
+    "after_event_mode": "full_year"
   }
 }

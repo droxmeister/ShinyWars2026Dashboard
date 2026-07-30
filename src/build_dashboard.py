@@ -7,7 +7,7 @@ import json
 import os
 from collections import defaultdict
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from math import floor
 from zoneinfo import ZoneInfo
 from pathlib import Path
@@ -198,6 +198,129 @@ def active_season(config: dict[str, Any], now: datetime) -> str:
     return "All"
 
 
+def recommendation_season_scope(
+    config: dict[str, Any],
+    now: datetime,
+) -> dict[str, Any]:
+    """Resolve which event seasons still belong in recommendations.
+
+    Explicit season views remain available for all four seasons. This scope is
+    used only for the ``All`` recommendation views and for the numerator of the
+    S/T combination ratio used by score multipliers.
+    """
+    scope = config.get("recommendation_season_scope", {})
+    mode = str(scope.get("mode", "full_year")).strip()
+    full_year = list(SEASONS)
+
+    if mode == "full_year":
+        return {
+            "mode": mode,
+            "phase": "full_year",
+            "eligibleSeasons": full_year,
+            "expiredSeasons": [],
+            "eventStartUtc": None,
+            "eventEndUtc": None,
+            "afterEventMode": "full_year",
+        }
+
+    if mode != "remaining_event_seasons":
+        raise ValueError(
+            "recommendation_season_scope.mode must be "
+            "'full_year' or 'remaining_event_seasons'"
+        )
+
+    timezone_name = str(
+        scope.get(
+            "timezone",
+            config.get("live_filter", {}).get("timezone", "Europe/Berlin"),
+        )
+    )
+    event_start = datetime.fromisoformat(str(scope["event_start_local"]))
+    if event_start.tzinfo is None:
+        event_start = event_start.replace(tzinfo=ZoneInfo(timezone_name))
+    event_start_utc = event_start.astimezone(timezone.utc)
+
+    order = [str(value) for value in scope.get("season_order", SEASONS)]
+    if not order or len(order) != len(set(order)) or any(season not in SEASONS for season in order):
+        raise ValueError(
+            "recommendation_season_scope.season_order must contain unique known seasons"
+        )
+    interval_days = float(scope.get("interval_days", 7))
+    if interval_days <= 0:
+        raise ValueError("recommendation_season_scope.interval_days must be positive")
+
+    interval = timedelta(days=interval_days)
+    event_end_utc = event_start_utc + interval * len(order)
+    now_utc = now.astimezone(timezone.utc)
+    before_mode = str(scope.get("before_event_mode", "full_event"))
+    after_mode = str(scope.get("after_event_mode", "full_year"))
+
+    if now_utc < event_start_utc:
+        if before_mode == "full_year":
+            eligible = full_year
+        elif before_mode == "full_event":
+            eligible = order
+        else:
+            raise ValueError(
+                "recommendation_season_scope.before_event_mode must be "
+                "'full_event' or 'full_year'"
+            )
+        phase = "before_event"
+    elif now_utc >= event_end_utc:
+        if after_mode == "full_year":
+            eligible = full_year
+            phase = "after_event_full_year"
+        elif after_mode == "none":
+            eligible = []
+            phase = "after_event"
+        else:
+            raise ValueError(
+                "recommendation_season_scope.after_event_mode must be "
+                "'full_year' or 'none'"
+            )
+    else:
+        elapsed = now_utc - event_start_utc
+        current_index = min(
+            int(elapsed.total_seconds() // interval.total_seconds()),
+            len(order) - 1,
+        )
+        eligible = order[current_index:]
+        phase = "during_event"
+
+    expired = [season for season in order if season not in eligible]
+    return {
+        "mode": mode,
+        "phase": phase,
+        "eligibleSeasons": eligible,
+        "expiredSeasons": expired,
+        "eventStartUtc": event_start_utc.isoformat().replace("+00:00", "Z"),
+        "eventEndUtc": event_end_utc.isoformat().replace("+00:00", "Z"),
+        "seasonOrder": order,
+        "intervalDays": interval_days,
+        "afterEventMode": after_mode,
+    }
+
+
+def scope_contexts_for_recommendations(
+    by_context: dict[str, list[dict[str, Any]]],
+    eligible_seasons: list[str],
+) -> tuple[dict[str, list[dict[str, Any]]], dict[str, Any]]:
+    """Copy normalized rows and apply remaining/full S/T counts."""
+    flat_rows = [
+        row
+        for records in by_context.values()
+        for row in records
+    ]
+    scoped_rows, _, diagnostics = annotate_temporal_exclusivity(
+        flat_rows,
+        eligible_seasons=eligible_seasons,
+    )
+    scoped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in scoped_rows:
+        scoped[str(row["context_id"])].append(row)
+    return dict(scoped), diagnostics
+
+
 def live_filter_payload(config: dict[str, Any]) -> dict[str, Any]:
     live = config.get("live_filter", {})
     game = live.get("game_clock", {})
@@ -332,7 +455,10 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
         "weightedHordeSize": float(row["weighted_horde_size"]),
         "scoreMultiplier": float(row["family_temporal_score_multiplier"]),
         "seasonTimeCombinationCount": int(
-            row["family_temporal_combination_count"]
+            row["family_temporal_combination_count_remaining"]
+        ),
+        "seasonTimeCombinationTotal": int(
+            row["family_temporal_combination_count_total"]
         ),
         "adjustedContribution": float(
             row["ranking_score_index_contribution"]
@@ -377,6 +503,7 @@ def serialize_context(
 def build_views(
     ranking_rows: list[dict[str, Any]],
     target_rows: list[dict[str, Any]],
+    recommendation_seasons: list[str] | tuple[str, ...] = SEASONS,
 ) -> dict[str, Any]:
     targets_by_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for target in target_rows:
@@ -394,7 +521,13 @@ def build_views(
         selected = [
             row
             for row in ranking_rows
-            if (season == "All" or row["season"] == season)
+            if (
+                (
+                    season == "All"
+                    and row["season"] in recommendation_seasons
+                )
+                or row["season"] == season
+            )
             and (time_name == "All" or row["time_of_day"] == time_name)
         ]
         key = f"{season}|{time_name}"
@@ -490,13 +623,18 @@ def build_payload(
     player_families, team_families, family_owners = resolve_catch_families(
         normalized, model["name_to_families"]
     )
-    family_sets = context_family_sets(model["by_context"])
+    recommendation_scope = recommendation_season_scope(config, generated_at)
+    scoped_by_context, scope_diagnostics = scope_contexts_for_recommendations(
+        model["by_context"],
+        recommendation_scope["eligibleSeasons"],
+    )
+    family_sets = context_family_sets(scoped_by_context)
     unique_bonus = float(config.get("unique_species_bonus", 8))
     duplicate_points = float(config.get("duplicate_points", 1))
     exclusion_enabled = bool(config.get("exclude_player_context_if_any_target_family_caught", True))
 
     team_rankings, team_targets, _ = rank_for_state(
-        model["by_context"],
+        scoped_by_context,
         team_families,
         set(),
         unique_bonus,
@@ -505,7 +643,11 @@ def build_payload(
         family_sets,
     )
     rankings: dict[str, Any] = {
-        "team": build_views(team_rankings, team_targets),
+        "team": build_views(
+            team_rankings,
+            team_targets,
+            recommendation_scope["eligibleSeasons"],
+        ),
         "players": {},
     }
     player_summaries: list[dict[str, Any]] = []
@@ -514,7 +656,7 @@ def build_payload(
 
     for player in normalized.players:
         player_rankings, player_targets, excluded_count = rank_for_state(
-            model["by_context"],
+            scoped_by_context,
             team_families,
             player_families[player],
             unique_bonus,
@@ -522,7 +664,11 @@ def build_payload(
             exclusion_enabled,
             family_sets,
         )
-        views = build_views(player_rankings, player_targets)
+        views = build_views(
+            player_rankings,
+            player_targets,
+            recommendation_scope["eligibleSeasons"],
+        )
         rankings["players"][player] = views
         default_key = f"{active}|{active_time_of_day}" if active != "All" else f"All|{active_time_of_day}"
         default_ids = views["views"].get(default_key, [])
@@ -549,6 +695,13 @@ def build_payload(
             "activeTimeOfDay": active_time_of_day,
             "gameTimeAtBuild": game_time_at_build,
             "liveFilter": live_filter_payload(config),
+            "recommendationSeasonScope": recommendation_scope,
+            "recommendationContextCount": len(
+                rankings["team"]["views"].get("All|All", [])
+            ),
+            "remainingTemporalCombinationUniverse": len(
+                recommendation_scope["eligibleSeasons"]
+            ) * len(TIMES),
             "playerCount": len(normalized.players),
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
@@ -586,11 +739,18 @@ def build_payload(
         ["Key", "Value"],
         ["Last successful update (UTC)", generated_at.isoformat()],
         ["Active event season", active],
+        [
+            "Recommendation seasons",
+            " | ".join(recommendation_scope["eligibleSeasons"]),
+        ],
+        ["Expired recommendation seasons", " | ".join(recommendation_scope["expiredSeasons"])],
+        ["Recommendation scope phase", recommendation_scope["phase"]],
         ["Active in-game time window", active_time_of_day],
         ["In-game time at build", game_time_at_build],
         ["Active players", len(normalized.players)],
         ["Team caught evolution families", len(team_families)],
         ["Ranked route contexts", model["diagnostics"]["context_count"]],
+        ["Recommended remaining contexts", len(rankings["team"]["views"].get("All|All", []))],
         ["Explicit Sweet Scent contexts", model["diagnostics"].get("sweet_scent_context_count", 0)],
         ["Fixed-probability override contexts", model["diagnostics"].get("fixed_probability_override_context_count", 0)],
         ["Ranking scope", "All matching route contexts"],

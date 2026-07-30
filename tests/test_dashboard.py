@@ -13,6 +13,7 @@ from src.build_dashboard import (
     context_family_sets,
     current_game_clock,
     rank_for_state,
+    recommendation_season_scope,
     resolve_catch_families,
 )
 from src.horde_core import (
@@ -79,6 +80,7 @@ class DashboardTests(unittest.TestCase):
         team_entry = payload["rankings"]["team"]["entries"][team_all[0]]
         target = team_entry["targets"][0]
         combination_count = target["seasonTimeCombinationCount"]
+        combination_total = target["seasonTimeCombinationTotal"]
 
         self.assertNotIn("topTargetExclusivity", team_entry)
         self.assertNotIn("temporalExclusivity", target)
@@ -86,6 +88,7 @@ class DashboardTests(unittest.TestCase):
         self.assertIsInstance(combination_count, int)
         self.assertGreaterEqual(combination_count, 1)
         self.assertLessEqual(combination_count, 12)
+        self.assertEqual(combination_count, combination_total)
         self.assertEqual(
             target["scoreMultiplier"],
             temporal_score_multiplier(combination_count),
@@ -94,6 +97,142 @@ class DashboardTests(unittest.TestCase):
             target["adjustedContribution"],
             target["legacyContribution"] * target["scoreMultiplier"],
         )
+
+    def test_recommendations_drop_expired_summer_but_keep_summer_filter(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+
+        scope = payload["meta"]["recommendationSeasonScope"]
+        self.assertEqual(scope["phase"], "during_event")
+        self.assertEqual(
+            scope["eligibleSeasons"],
+            ["Autumn", "Winter", "Spring"],
+        )
+        self.assertEqual(scope["expiredSeasons"], ["Summer"])
+
+        team = payload["rankings"]["team"]
+        recommendation_ids = team["views"]["All|All"]
+        summer_ids = team["views"]["Summer|All"]
+        self.assertTrue(recommendation_ids)
+        self.assertTrue(summer_ids)
+        self.assertTrue(
+            all(team["entries"][context_id]["season"] != "Summer" for context_id in recommendation_ids)
+        )
+        self.assertTrue(
+            all(team["entries"][context_id]["season"] == "Summer" for context_id in summer_ids)
+        )
+        self.assertLess(
+            len(recommendation_ids),
+            payload["meta"]["routeContextCount"],
+        )
+        self.assertEqual(
+            len(recommendation_ids),
+            payload["meta"]["recommendationContextCount"],
+        )
+
+        reduced_targets = [
+            target
+            for entry in team["entries"].values()
+            for target in entry["targets"]
+            if target["seasonTimeCombinationCount"]
+            < target["seasonTimeCombinationTotal"]
+        ]
+        self.assertTrue(reduced_targets)
+        for target in reduced_targets[:50]:
+            self.assertEqual(
+                target["scoreMultiplier"],
+                temporal_score_multiplier(
+                    target["seasonTimeCombinationCount"]
+                ),
+            )
+
+    def test_combination_ratio_uses_remaining_union_as_numerator(self) -> None:
+        rows = [
+            {
+                "pokemon": "Alpha",
+                "scoring_family": "Alpha family",
+                "season": "Summer",
+                "time_of_day": "morning",
+                "region_id": 1,
+                "location_id": 1,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+            {
+                "pokemon": "Beta",
+                "scoring_family": "Alpha family",
+                "season": "Autumn",
+                "time_of_day": "morning",
+                "region_id": 1,
+                "location_id": 2,
+                "tier": 1,
+                "base_points": 10.0,
+            },
+        ]
+
+        annotated, _, _ = annotate_temporal_exclusivity(
+            rows,
+            eligible_seasons=["Autumn", "Winter", "Spring"],
+        )
+        self.assertTrue(
+            all(
+                row["family_temporal_combination_count_remaining"] == 1
+                for row in annotated
+            )
+        )
+        self.assertTrue(
+            all(
+                row["family_temporal_combination_count_total"] == 2
+                for row in annotated
+            )
+        )
+        self.assertTrue(
+            all(row["family_temporal_combination_count"] == 1 for row in annotated)
+        )
+
+    def test_after_event_returns_automatically_to_full_year(self) -> None:
+        scope = recommendation_season_scope(
+            self.config,
+            datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+        self.assertEqual(scope["phase"], "after_event_full_year")
+        self.assertEqual(scope["eligibleSeasons"], list(("Summer", "Autumn", "Winter", "Spring")))
+        self.assertEqual(scope["expiredSeasons"], [])
+
+    def test_post_event_payload_restores_full_year_counts_and_recommendations(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            self.config,
+            datetime(2026, 8, 30, tzinfo=timezone.utc),
+        )
+        team = payload["rankings"]["team"]
+        self.assertEqual(
+            len(team["views"]["All|All"]),
+            payload["meta"]["routeContextCount"],
+        )
+        for entry in list(team["entries"].values())[:100]:
+            for target in entry["targets"]:
+                self.assertEqual(
+                    target["seasonTimeCombinationCount"],
+                    target["seasonTimeCombinationTotal"],
+                )
 
     def test_weekly_season_rotation_uses_configured_local_anchor(self) -> None:
         self.assertEqual(

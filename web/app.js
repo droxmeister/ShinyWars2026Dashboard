@@ -379,65 +379,30 @@ function filteredCurrentRows() {
   );
 }
 
-function combinationLabelInfo(combinationCount) {
-  const count = Number(combinationCount);
-
-  if (!Number.isInteger(count) || count < 1) {
-    return null;
-  }
-
-  const text =
-    count === 1
-      ? "1 S/T Combination"
-      : `${count} S/T Combinations`;
-
-  if (count === 1) {
-    return {
-      text,
-      cssClass: "combination-red",
-    };
-  }
-
-  if (count === 2) {
-    return {
-      text,
-      cssClass: "combination-orange",
-    };
-  }
-
-  if (count <= 4) {
-    return {
-      text,
-      cssClass: "combination-yellow",
-    };
-  }
-
-  return {
-    text,
-    cssClass: "combination-green",
-  };
-}
 
 function combinationLabelInfo(
-  combinationCount
+  combinationCount,
+  combinationTotal
 ) {
-  const count = Number(
-    combinationCount
+  const count = Number(combinationCount);
+  const total = Number(
+    combinationTotal ?? combinationCount
   );
 
   if (
     !Number.isInteger(count) ||
-    count < 1
+    !Number.isInteger(total) ||
+    count < 0 ||
+    total < 1 ||
+    count > total
   ) {
     return null;
   }
 
   const text =
-    count === 1
-      ? "1 S/T Combination"
-      : `${count} S/T Combinations`;
+    `${count}/${total} S/T Combinations`;
 
-  if (count === 1) {
+  if (count <= 1) {
     return {
       text,
       cssClass: "combination-red",
@@ -490,7 +455,9 @@ function targetDetailsHtml(targets) {
       const combinationInfo =
         combinationLabelInfo(
           target
-            .seasonTimeCombinationCount
+            .seasonTimeCombinationCount,
+          target
+            .seasonTimeCombinationTotal
         );
 
       const combinationLabel =
@@ -830,7 +797,9 @@ function rankingRowHtml({
   const topCombinationInfo =
     combinationLabelInfo(
       topTargetDetails
-        ?.seasonTimeCombinationCount
+        ?.seasonTimeCombinationCount,
+      topTargetDetails
+        ?.seasonTimeCombinationTotal
     );
 
   const topCombinationLabel =
