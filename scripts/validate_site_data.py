@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,16 @@ def number(value: Any, label: str) -> float:
 
 def close(left: float, right: float) -> bool:
     return math.isclose(left, right, rel_tol=1e-9, abs_tol=TOLERANCE)
+
+
+def iso_datetime(value: Any, label: str) -> datetime:
+    require(isinstance(value, str) and value.strip(), f"{label} must be a non-empty string")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValidationError(f"{label} must be a valid ISO-8601 datetime") from exc
+    require(parsed.tzinfo is not None, f"{label} must include timezone information")
+    return parsed
 
 
 def expected_multiplier(remaining_count: int) -> float:
@@ -192,6 +203,33 @@ def main() -> None:
         require(path.is_file(), f"Strategy file does not exist: {path}")
         data = obj(json.loads(path.read_text(encoding="utf-8")), "root")
         meta = obj(data.get("meta"), "meta")
+        generated_at = iso_datetime(meta.get("generatedAtUtc"), "meta.generatedAtUtc")
+        calculation_at = iso_datetime(meta.get("calculationAtUtc"), "meta.calculationAtUtc")
+        simulation = obj(meta.get("timeSimulation"), "meta.timeSimulation")
+        simulation_enabled = simulation.get("enabled")
+        require(isinstance(simulation_enabled, bool), "meta.timeSimulation.enabled must be boolean")
+        simulation_effective = iso_datetime(
+            simulation.get("effectiveAtUtc"),
+            "meta.timeSimulation.effectiveAtUtc",
+        )
+        simulation_build = iso_datetime(
+            simulation.get("actualBuildAtUtc"),
+            "meta.timeSimulation.actualBuildAtUtc",
+        )
+        require(
+            simulation_effective == calculation_at,
+            "timeSimulation.effectiveAtUtc must match calculationAtUtc",
+        )
+        require(
+            simulation_build == generated_at,
+            "timeSimulation.actualBuildAtUtc must match generatedAtUtc",
+        )
+        if simulation_enabled:
+            require(
+                bool(str(simulation.get("configuredDateTimeLocal", "")).strip()),
+                "enabled time simulation requires configuredDateTimeLocal",
+            )
+
         scope = obj(meta.get("recommendationSeasonScope"), "meta.recommendationSeasonScope")
         eligible_list = array(scope.get("eligibleSeasons"), "eligibleSeasons")
         eligible = {str(season) for season in eligible_list}

@@ -2,6 +2,11 @@
   "unique_species_bonus": 8,
   "duplicate_points": 1,
   "exclude_player_context_if_any_target_family_caught": true,
+  "time_simulation": {
+    "enabled": true,
+    "timezone": "Europe/Berlin",
+    "datetime_local": "2026-08-08T00:04:00"
+  },
   "fixed_horde_probability_overrides": [
     {
       "pokemon": "Zorua",

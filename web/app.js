@@ -102,6 +102,34 @@ function effectiveTime() {
     : state.manualTime;
 }
 
+function activeTimeSimulation() {
+  const simulation =
+    state.data?.meta?.timeSimulation;
+
+  return simulation?.enabled
+    ? simulation
+    : null;
+}
+
+function dashboardNow() {
+  const simulation =
+    activeTimeSimulation();
+
+  if (simulation?.effectiveAtUtc) {
+    const simulatedDate = new Date(
+      simulation.effectiveAtUtc
+    );
+
+    if (!Number.isNaN(
+      simulatedDate.getTime()
+    )) {
+      return simulatedDate;
+    }
+  }
+
+  return new Date();
+}
+
 function resetVisibleCount() {
   state.visibleCount = PAGE_SIZE;
 }
@@ -654,12 +682,18 @@ function updateFilterControls() {
       ? "Live filters: ON"
       : "Live filters: OFF";
 
+  const simulationSuffix =
+    activeTimeSimulation()
+      ? " (simulated)"
+      : "";
+
   els.liveFilterHint.textContent =
     state.autoFilter
       ? (
           `Automatically using ` +
           `${state.liveSeason} · ` +
-          `${state.liveTimeLabel}`
+          `${state.liveTimeLabel}` +
+          simulationSuffix
         )
       : (
           `Manual selection: ` +
@@ -699,7 +733,7 @@ function refreshLiveContext({
       liveConfig &&
       window.ShinyWarsClock
     ) {
-      const now = new Date();
+      const now = dashboardNow();
 
       const clock =
         window.ShinyWarsClock.gameClockAt(
@@ -1173,25 +1207,48 @@ async function init() {
       `${state.data.meta.routeContextCount} ` +
       `route contexts`;
 
+    const simulation =
+      activeTimeSimulation();
+
     if (els.subtitle) {
-      els.subtitle.textContent =
+      const baseSubtitle =
         "All team and player-specific " +
         "horde spots, ranked from " +
         "highest to lowest score.";
+
+      els.subtitle.textContent =
+        simulation
+          ? (
+              `${baseSubtitle} ` +
+              `Simulation preview: ` +
+              `${new Date(
+                simulation.effectiveAtUtc
+              ).toLocaleString()}.`
+            )
+          : baseSubtitle;
     }
 
     els.badge.textContent =
-      "Strategy data loaded";
+      simulation
+        ? (
+            `Simulation: ` +
+            `${new Date(
+              simulation.effectiveAtUtc
+            ).toLocaleString()}`
+          )
+        : "Strategy data loaded";
 
     els.badge.classList.add("ok");
 
     render();
 
-    state.clockTimer =
-      window.setInterval(
-        () => refreshLiveContext(),
-        1000
-      );
+    if (!simulation) {
+      state.clockTimer =
+        window.setInterval(
+          () => refreshLiveContext(),
+          1000
+        );
+    }
   } catch (error) {
     console.error(error);
 

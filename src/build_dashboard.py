@@ -131,6 +131,64 @@ def _classify_game_time(game_minute: int, windows: dict[str, Any]) -> str:
     raise ValueError(f"No time window contains game minute {game_minute}")
 
 
+
+def resolve_dashboard_time(
+    config: dict[str, Any],
+    actual_now: datetime,
+) -> tuple[datetime, dict[str, Any]]:
+    """Resolve the timestamp used for rankings and live dashboard context.
+
+    Production mode uses ``actual_now``. When ``time_simulation.enabled`` is
+    true, ``datetime_local`` is interpreted in the configured timezone and is
+    used as a frozen reference timestamp. The actual build timestamp remains
+    available separately in the generated payload.
+    """
+    if actual_now.tzinfo is None:
+        raise ValueError("actual_now must include timezone information")
+
+    actual_utc = actual_now.astimezone(timezone.utc)
+    simulation = config.get("time_simulation", {})
+    enabled = parse_bool(simulation.get("enabled"), default=False)
+    timezone_name = str(
+        simulation.get(
+            "timezone",
+            config.get("live_filter", {}).get("timezone", "Europe/Berlin"),
+        )
+    ).strip() or "Europe/Berlin"
+
+    configured_local: str | None = None
+    effective_utc = actual_utc
+
+    if enabled:
+        configured_local = str(simulation.get("datetime_local", "")).strip()
+        if not configured_local:
+            raise ValueError(
+                "time_simulation.datetime_local is required when simulation is enabled"
+            )
+        try:
+            configured_datetime = datetime.fromisoformat(
+                configured_local.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "time_simulation.datetime_local must be a valid ISO-8601 datetime"
+            ) from exc
+
+        if configured_datetime.tzinfo is None:
+            configured_datetime = configured_datetime.replace(
+                tzinfo=ZoneInfo(timezone_name)
+            )
+        effective_utc = configured_datetime.astimezone(timezone.utc)
+
+    metadata = {
+        "enabled": enabled,
+        "timezone": timezone_name,
+        "configuredDateTimeLocal": configured_local,
+        "effectiveAtUtc": effective_utc.isoformat().replace("+00:00", "Z"),
+        "actualBuildAtUtc": actual_utc.isoformat().replace("+00:00", "Z"),
+    }
+    return effective_utc, metadata
+
 def current_game_clock(config: dict[str, Any], now: datetime) -> tuple[str, str]:
     live = config.get("live_filter", {})
     timezone_name = str(live.get("timezone", "Europe/Berlin"))
@@ -619,11 +677,30 @@ def build_payload(
     normalized: NormalizedInput,
     config: dict[str, Any],
     generated_at: datetime,
+    *,
+    actual_generated_at: datetime | None = None,
+    time_simulation: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[list[Any]], list[list[Any]], list[list[Any]]]:
+    calculation_at = generated_at.astimezone(timezone.utc)
+    actual_build_at = (actual_generated_at or generated_at).astimezone(timezone.utc)
+    if time_simulation is None:
+        time_simulation = {
+            "enabled": False,
+            "timezone": str(
+                config.get("time_simulation", {}).get(
+                    "timezone",
+                    config.get("live_filter", {}).get("timezone", "Europe/Berlin"),
+                )
+            ),
+            "configuredDateTimeLocal": None,
+            "effectiveAtUtc": calculation_at.isoformat().replace("+00:00", "Z"),
+            "actualBuildAtUtc": actual_build_at.isoformat().replace("+00:00", "Z"),
+        }
+
     player_families, team_families, family_owners = resolve_catch_families(
         normalized, model["name_to_families"]
     )
-    recommendation_scope = recommendation_season_scope(config, generated_at)
+    recommendation_scope = recommendation_season_scope(config, calculation_at)
     scoped_by_context, scope_diagnostics = scope_contexts_for_recommendations(
         model["by_context"],
         recommendation_scope["eligibleSeasons"],
@@ -651,8 +728,8 @@ def build_payload(
         "players": {},
     }
     player_summaries: list[dict[str, Any]] = []
-    active = active_season(config, generated_at)
-    game_time_at_build, active_time_of_day = current_game_clock(config, generated_at)
+    active = active_season(config, calculation_at)
+    game_time_at_build, active_time_of_day = current_game_clock(config, calculation_at)
 
     for player in normalized.players:
         player_rankings, player_targets, excluded_count = rank_for_state(
@@ -690,7 +767,9 @@ def build_payload(
     )
     payload = {
         "meta": {
-            "generatedAtUtc": generated_at.isoformat(),
+            "generatedAtUtc": actual_build_at.isoformat(),
+            "calculationAtUtc": calculation_at.isoformat(),
+            "timeSimulation": time_simulation,
             "activeSeason": active,
             "activeTimeOfDay": active_time_of_day,
             "gameTimeAtBuild": game_time_at_build,
@@ -737,7 +816,9 @@ def build_payload(
 
     sync_status = [
         ["Key", "Value"],
-        ["Last successful update (UTC)", generated_at.isoformat()],
+        ["Last successful update (UTC)", actual_build_at.isoformat()],
+        ["Calculation reference time (UTC)", calculation_at.isoformat()],
+        ["Time simulation", "Enabled" if time_simulation.get("enabled") else "Disabled"],
         ["Active event season", active],
         [
             "Recommendation seasons",
@@ -822,9 +903,18 @@ def main() -> None:
         args.tiers,
         config.get("fixed_horde_probability_overrides", []),
     )
-    generated_at = datetime.now(timezone.utc)
+    actual_generated_at = datetime.now(timezone.utc)
+    calculation_at, simulation_metadata = resolve_dashboard_time(
+        config,
+        actual_generated_at,
+    )
     payload, sync_status, checklist_rows, player_summary_rows = build_payload(
-        model, normalized, config, generated_at
+        model,
+        normalized,
+        config,
+        calculation_at,
+        actual_generated_at=actual_generated_at,
+        time_simulation=simulation_metadata,
     )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -845,6 +935,8 @@ def main() -> None:
                 "players": len(normalized.players),
                 "team_caught_families": payload["meta"]["teamCaughtFamilyCount"],
                 "active_season": payload["meta"]["activeSeason"],
+                "time_simulation_enabled": payload["meta"]["timeSimulation"]["enabled"],
+                "calculation_at_utc": payload["meta"]["calculationAtUtc"],
                 "top_team_spot": _top_team_display(payload),
                 "warnings": list(normalized.warnings),
             },

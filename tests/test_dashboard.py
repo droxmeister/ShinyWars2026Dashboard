@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from src.build_dashboard import (
     rank_for_state,
     recommendation_season_scope,
     resolve_catch_families,
+    resolve_dashboard_time,
 )
 from src.horde_core import (
     ScoringState,
@@ -233,6 +235,80 @@ class DashboardTests(unittest.TestCase):
                     target["seasonTimeCombinationCount"],
                     target["seasonTimeCombinationTotal"],
                 )
+
+
+    def test_disabled_time_simulation_uses_actual_time(self) -> None:
+        config = deepcopy(self.config)
+        config["time_simulation"]["enabled"] = False
+        actual = datetime(2026, 7, 30, 16, 0, tzinfo=timezone.utc)
+
+        effective, metadata = resolve_dashboard_time(config, actual)
+
+        self.assertEqual(effective, actual)
+        self.assertFalse(metadata["enabled"])
+        self.assertIsNone(metadata["configuredDateTimeLocal"])
+        self.assertEqual(metadata["effectiveAtUtc"], "2026-07-30T16:00:00Z")
+
+    def test_config_can_simulate_arbitrary_local_datetime(self) -> None:
+        config = deepcopy(self.config)
+        config["time_simulation"] = {
+            "enabled": True,
+            "timezone": "Europe/Berlin",
+            "datetime_local": "2026-08-08T00:02:00",
+        }
+        actual = datetime(2026, 7, 30, 16, 0, tzinfo=timezone.utc)
+
+        effective, metadata = resolve_dashboard_time(config, actual)
+
+        self.assertEqual(
+            effective,
+            datetime(2026, 8, 7, 22, 2, tzinfo=timezone.utc),
+        )
+        self.assertTrue(metadata["enabled"])
+        self.assertEqual(
+            metadata["configuredDateTimeLocal"],
+            "2026-08-08T00:02:00",
+        )
+        scope = recommendation_season_scope(config, effective)
+        self.assertEqual(
+            scope["eligibleSeasons"],
+            ["Autumn", "Winter", "Spring"],
+        )
+        self.assertEqual(scope["expiredSeasons"], ["Summer"])
+
+    def test_simulated_payload_keeps_actual_build_timestamp_separate(self) -> None:
+        config = deepcopy(self.config)
+        config["time_simulation"] = {
+            "enabled": True,
+            "timezone": "Europe/Berlin",
+            "datetime_local": "2026-08-08T00:02:00",
+        }
+        actual = datetime(2026, 7, 30, 16, 0, tzinfo=timezone.utc)
+        effective, metadata = resolve_dashboard_time(config, actual)
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+
+        payload, *_ = build_payload(
+            self.model,
+            normalized,
+            config,
+            effective,
+            actual_generated_at=actual,
+            time_simulation=metadata,
+        )
+
+        self.assertEqual(payload["meta"]["generatedAtUtc"], actual.isoformat())
+        self.assertEqual(payload["meta"]["calculationAtUtc"], effective.isoformat())
+        self.assertTrue(payload["meta"]["timeSimulation"]["enabled"])
+        self.assertEqual(payload["meta"]["activeSeason"], "Autumn")
+        self.assertEqual(
+            payload["meta"]["recommendationSeasonScope"]["expiredSeasons"],
+            ["Summer"],
+        )
 
     def test_weekly_season_rotation_uses_configured_local_anchor(self) -> None:
         self.assertEqual(
