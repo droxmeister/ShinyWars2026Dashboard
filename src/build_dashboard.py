@@ -330,7 +330,6 @@ def serialize_context(
 def build_views(
     ranking_rows: list[dict[str, Any]],
     target_rows: list[dict[str, Any]],
-    top_n: int,
 ) -> dict[str, Any]:
     targets_by_context: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for target in target_rows:
@@ -350,7 +349,7 @@ def build_views(
             for row in ranking_rows
             if (season == "All" or row["season"] == season)
             and (time_name == "All" or row["time_of_day"] == time_name)
-        ][:top_n]
+        ]
         key = f"{season}|{time_name}"
         ids: list[str] = []
         for row in selected:
@@ -444,7 +443,6 @@ def build_payload(
         normalized, model["name_to_families"]
     )
     family_sets = context_family_sets(model["by_context"])
-    top_n = int(config.get("top_n", 25))
     unique_bonus = float(config.get("unique_species_bonus", 8))
     duplicate_points = float(config.get("duplicate_points", 1))
     exclusion_enabled = bool(config.get("exclude_player_context_if_any_target_family_caught", True))
@@ -459,7 +457,7 @@ def build_payload(
         family_sets,
     )
     rankings: dict[str, Any] = {
-        "team": build_views(team_rankings, team_targets, top_n),
+        "team": build_views(team_rankings, team_targets),
         "players": {},
     }
     player_summaries: list[dict[str, Any]] = []
@@ -476,7 +474,7 @@ def build_payload(
             exclusion_enabled,
             family_sets,
         )
-        views = build_views(player_rankings, player_targets, top_n)
+        views = build_views(player_rankings, player_targets)
         rankings["players"][player] = views
         default_key = f"{active}|{active_time_of_day}" if active != "All" else f"All|{active_time_of_day}"
         default_ids = views["views"].get(default_key, [])
@@ -503,7 +501,6 @@ def build_payload(
             "activeTimeOfDay": active_time_of_day,
             "gameTimeAtBuild": game_time_at_build,
             "liveFilter": live_filter_payload(config),
-            "topN": top_n,
             "playerCount": len(normalized.players),
             "teamCaughtFamilyCount": len(team_families),
             "routeContextCount": model["diagnostics"]["context_count"],
@@ -540,7 +537,7 @@ def build_payload(
         ["Active players", len(normalized.players)],
         ["Team caught evolution families", len(team_families)],
         ["Ranked route contexts", model["diagnostics"]["context_count"]],
-        ["Top spots per view", top_n],
+        ["Ranking scope", "All matching route contexts"],
         ["Player context exclusion", "Enabled" if exclusion_enabled else "Disabled"],
         ["Warnings", " | ".join(normalized.warnings)],
     ]

@@ -59,9 +59,8 @@ class DashboardTests(unittest.TestCase):
         )
         self.assertEqual(payload["meta"]["activeSeason"], "Summer")
         self.assertEqual(payload["players"], ["Alpha", "Beta"])
-        expected_top_n = int(self.config["top_n"])
-        self.assertEqual(len(payload["rankings"]["team"]["views"]["All|All"]), expected_top_n)
-        self.assertEqual(len(payload["rankings"]["players"]["Alpha"]["views"]["Summer|All"]), expected_top_n)
+        team_ids = payload["rankings"]["team"]["views"]["All|All"]
+        self.assertEqual(len(team_ids),self.model["diagnostics"]["context_count"],)
         self.assertIn("liveFilter", payload["meta"])
         self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["anchorSeason"], "Summer")
         self.assertEqual(payload["meta"]["liveFilter"]["seasonRotation"]["beforeAnchorSeason"], "Autumn")
@@ -76,6 +75,14 @@ class DashboardTests(unittest.TestCase):
         self.assertNotIn("temporalExclusivity", team_entry["targets"][0])
         self.assertNotIn("temporalDetails", team_entry["targets"][0])
         self.assertIn("scoreMultiplier", team_entry["targets"][0])
+
+        team_bundle = payload["rankings"]["team"]
+        team_ids = team_bundle["views"]["All|All"]
+        scores = [
+            team_bundle["entries"][context_id]["adjustedScore"]
+            for context_id in team_ids
+        ]
+        self.assertEqual(scores, sorted(scores, reverse=True))
 
     def test_weekly_season_rotation_uses_configured_local_anchor(self):
         self.assertEqual(
