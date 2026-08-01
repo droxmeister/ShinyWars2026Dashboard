@@ -46,6 +46,23 @@ def parse_bool(value: Any, default: bool = True) -> bool:
     return text not in {"false", "0", "no", "n", "off", "inactive"}
 
 
+def temporal_exclusivity_multiplier_enabled(config: dict[str, Any]) -> bool:
+    """Return whether Season/Time exclusivity changes ranking scores.
+
+    The option defaults to enabled so repositories that do not yet contain the
+    new ``scoring`` block retain the previous dashboard behavior.
+    """
+    scoring = config.get("scoring", {})
+    if scoring is None:
+        scoring = {}
+    if not isinstance(scoring, dict):
+        raise ValueError("config.scoring must be an object")
+    value = scoring.get("use_temporal_exclusivity_multiplier", True)
+    if isinstance(value, bool):
+        return value
+    return parse_bool(value, default=True)
+
+
 def load_local_csv(input_dir: Path) -> SheetInput:
     def read(name: str) -> list[dict[str, str]]:
         path = input_dir / name
@@ -588,6 +605,13 @@ def annotate_annual_context_scores(
     return annotated
 
 
+def applied_score_multiplier(row: dict[str, Any]) -> float:
+    """Return the multiplier that was actually applied to this ranking row."""
+    if str(row.get("ranking_mode", "")) == "legacy_no_exclusivity":
+        return 1.0
+    return float(row["family_temporal_score_multiplier"])
+
+
 def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "species": str(row["encountered_species"]),
@@ -601,7 +625,7 @@ def serialize_target(row: dict[str, Any]) -> dict[str, Any]:
         ),
         "shinyCheckSharePercent": float(row["shiny_check_share_percent"]),
         "weightedHordeSize": float(row["weighted_horde_size"]),
-        "scoreMultiplier": float(row["family_temporal_score_multiplier"]),
+        "scoreMultiplier": applied_score_multiplier(row),
         "seasonTimeCombinationCount": int(
             row["family_temporal_combination_count_remaining"]
         ),
@@ -649,7 +673,11 @@ def serialize_context(
         "topTargetFamily": str(row["top_target_family"]),
         "topTargetPoints": float(row["top_target_points"]),
         "topTargetProbabilityPercent": float(row["top_target_horde_probability_percent"]),
-        "topTargetScoreMultiplier": float(row["top_target_score_multiplier"]),
+        "topTargetScoreMultiplier": (
+            1.0
+            if str(row.get("ranking_mode", "")) == "legacy_no_exclusivity"
+            else float(row["top_target_score_multiplier"])
+        ),
         "fallbackTarget": str(row.get("fallback_target", "")),
         "fallbackPoints": float(row["fallback_target_points"]) if row.get("fallback_target_points") not in ("", None) else None,
         "allTargetsText": str(row["all_targets"]),
@@ -736,9 +764,7 @@ def build_best_spot_entries(
             "topTargetProbabilityPercent": float(
                 target["horde_roll_probability_percent"]
             ),
-            "topTargetScoreMultiplier": float(
-                target["family_temporal_score_multiplier"]
-            ),
+            "topTargetScoreMultiplier": applied_score_multiplier(target),
             "fallbackTarget": "",
             "fallbackPoints": None,
             "allTargetsText": (
@@ -811,6 +837,7 @@ def rank_for_state(
     duplicate_points: float,
     exclude_contexts: bool,
     family_sets_by_context: dict[str, set[str]],
+    use_temporal_exclusivity: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     state = ScoringState(
         unique_bonus=unique_bonus,
@@ -821,7 +848,7 @@ def rank_for_state(
     rankings, targets = rank_contexts(
         by_context,
         state,
-        use_temporal_exclusivity=True,
+        use_temporal_exclusivity=use_temporal_exclusivity,
     )
     if not exclude_contexts or not player_families:
         return rankings, targets, 0
@@ -911,6 +938,7 @@ def build_payload(
     full_year_family_sets = context_family_sets(model["by_context"])
     unique_bonus = float(config.get("unique_species_bonus", 8))
     duplicate_points = float(config.get("duplicate_points", 1))
+    use_temporal_exclusivity = temporal_exclusivity_multiplier_enabled(config)
     exclusion_enabled = bool(config.get("exclude_player_context_if_any_target_family_caught", True))
 
     team_rankings, team_targets, _ = rank_for_state(
@@ -921,6 +949,7 @@ def build_payload(
         duplicate_points,
         False,
         family_sets,
+        use_temporal_exclusivity,
     )
     annual_team_rankings, annual_team_targets, _ = rank_for_state(
         model["by_context"],
@@ -930,6 +959,7 @@ def build_payload(
         duplicate_points,
         False,
         full_year_family_sets,
+        use_temporal_exclusivity,
     )
     _, best_annual_context_by_family = annotate_best_annual_family_contexts(
         annual_team_targets
@@ -970,6 +1000,7 @@ def build_payload(
             duplicate_points,
             exclusion_enabled,
             family_sets,
+            use_temporal_exclusivity,
         )
         annual_player_rankings, annual_player_targets, _ = rank_for_state(
             model["by_context"],
@@ -979,6 +1010,7 @@ def build_payload(
             duplicate_points,
             exclusion_enabled,
             full_year_family_sets,
+            use_temporal_exclusivity,
         )
         _, player_best_annual_context_by_family = (
             annotate_best_annual_family_contexts(
@@ -1054,14 +1086,29 @@ def build_payload(
             ),
             "annualBestSelectionMode": "full_context_adjusted_score",
             "annualBestTieMode": "all_equal_maxima",
-            "rankingMode": "temporal_exclusivity",
-            "scoreAdjustmentByCombinationCount": {
-                "1": 2.0,
-                "2": 1.5,
-                "3": 1.25,
-                "4": 1.1,
-                "default": 1.0,
-            },
+            "temporalExclusivityScoreMultiplierEnabled": use_temporal_exclusivity,
+            "rankingMode": (
+                "temporal_exclusivity"
+                if use_temporal_exclusivity
+                else "legacy_no_exclusivity"
+            ),
+            "scoreAdjustmentByCombinationCount": (
+                {
+                    "1": 2.0,
+                    "2": 1.5,
+                    "3": 1.25,
+                    "4": 1.1,
+                    "default": 1.0,
+                }
+                if use_temporal_exclusivity
+                else {
+                    "1": 1.0,
+                    "2": 1.0,
+                    "3": 1.0,
+                    "4": 1.0,
+                    "default": 1.0,
+                }
+            ),
             "uniqueSpeciesBonus": unique_bonus,
             "duplicatePoints": duplicate_points,
             "playerContextExclusionEnabled": exclusion_enabled,
@@ -1099,6 +1146,16 @@ def build_payload(
         ["Explicit Sweet Scent contexts", model["diagnostics"].get("sweet_scent_context_count", 0)],
         ["Fixed-probability override contexts", model["diagnostics"].get("fixed_probability_override_context_count", 0)],
         ["Ranking scope", "All matching route contexts"],
+        [
+            "Temporal exclusivity score multiplier",
+            "Enabled" if use_temporal_exclusivity else "Disabled (legacy score only)",
+        ],
+        [
+            "Ranking mode",
+            "temporal_exclusivity"
+            if use_temporal_exclusivity
+            else "legacy_no_exclusivity",
+        ],
         ["Player context exclusion", "Enabled" if exclusion_enabled else "Disabled"],
         ["Warnings", " | ".join(normalized.warnings)],
     ]

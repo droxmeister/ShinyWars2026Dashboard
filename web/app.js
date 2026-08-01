@@ -297,6 +297,14 @@ function setSort(sortBy) {
 }
 
 
+function rankingScoreLabel() {
+  return state.data?.meta
+    ?.temporalExclusivityScoreMultiplierEnabled === false
+    ? "Legacy Score"
+    : "Adjusted Score";
+}
+
+
 function updateSortButtons() {
   const scoreActive =
     state.sortBy === "adjustedScore";
@@ -310,10 +318,12 @@ function updateSortButtons() {
       : "↑";
 
   if (els.sortAdjustedScore) {
+    const scoreLabel = rankingScoreLabel();
+
     els.sortAdjustedScore.textContent =
       scoreActive
-        ? `Adjusted Score ${directionSymbol}`
-        : "Adjusted Score";
+        ? `${scoreLabel} ${directionSymbol}`
+        : scoreLabel;
 
     els.sortAdjustedScore.classList.toggle(
       "is-active",
@@ -1299,6 +1309,15 @@ function render() {
               `duplicated evolution families to ` +
               `the configured duplicate value.`
             );
+
+  if (
+    state.data.meta
+      .temporalExclusivityScoreMultiplierEnabled === false
+  ) {
+    els.explanation.textContent +=
+      " Temporal exclusivity multipliers are disabled; " +
+      "rankings use the Legacy Score only.";
+  }
 
   updatePaginationControls(
     visibleRows.length,

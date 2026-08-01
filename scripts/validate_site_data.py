@@ -56,11 +56,18 @@ def iso_datetime(value: Any, label: str) -> datetime:
     return parsed
 
 
-def expected_multiplier(remaining_count: int) -> float:
+def expected_multiplier(remaining_count: int, enabled: bool) -> float:
+    if not enabled:
+        return 1.0
     return MULTIPLIERS.get(remaining_count, 1.0)
 
 
-def validate_target(target_raw: Any, label: str) -> None:
+def validate_target(
+    target_raw: Any,
+    label: str,
+    *,
+    multiplier_enabled: bool,
+) -> None:
     target = obj(target_raw, label)
     require(bool(str(target.get("species", "")).strip()), f"{label}.species is empty")
     require(bool(str(target.get("family", "")).strip()), f"{label}.family is empty")
@@ -82,7 +89,7 @@ def validate_target(target_raw: Any, label: str) -> None:
 
     multiplier = number(target.get("scoreMultiplier"), f"{label}.scoreMultiplier")
     require(
-        close(multiplier, expected_multiplier(remaining)),
+        close(multiplier, expected_multiplier(remaining, multiplier_enabled)),
         f"{label}.scoreMultiplier {multiplier} does not match {remaining}/{total} combinations",
     )
 
@@ -101,7 +108,13 @@ def validate_target(target_raw: Any, label: str) -> None:
     )
 
 
-def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
+def validate_entry(
+    context_id: str,
+    entry_raw: Any,
+    label: str,
+    *,
+    multiplier_enabled: bool,
+) -> None:
     entry = obj(entry_raw, label)
     require(entry.get("contextId") == context_id, f"{label}.contextId does not match")
     require(entry.get("season") in SEASONS, f"{label}.season is invalid")
@@ -109,7 +122,11 @@ def validate_entry(context_id: str, entry_raw: Any, label: str) -> None:
     targets = array(entry.get("targets"), f"{label}.targets")
     require(targets, f"{label}.targets must not be empty")
     for index, target in enumerate(targets):
-        validate_target(target, f"{label}.targets[{index}]")
+        validate_target(
+            target,
+            f"{label}.targets[{index}]",
+            multiplier_enabled=multiplier_enabled,
+        )
 
     target_by_species = {str(target["species"]): target for target in targets}
     top_name = str(entry.get("topTarget", ""))
@@ -148,6 +165,8 @@ def validate_best_spots(
     entries: dict[str, Any],
     marker_contexts: dict[str, set[str]],
     label: str,
+    *,
+    multiplier_enabled: bool,
 ) -> list[dict[str, Any]]:
     best_spots = array(best_spots_raw, label)
     expected_pairs = {
@@ -169,7 +188,12 @@ def validate_best_spots(
         require(best_id, f"{label}[{index}].contextId is empty")
         require(best_id not in seen_ids, f"{label} contains duplicate contextId {best_id!r}")
         seen_ids.add(best_id)
-        validate_entry(best_id, best, f"{label}[{index}]")
+        validate_entry(
+            best_id,
+            best,
+            f"{label}[{index}]",
+            multiplier_enabled=multiplier_enabled,
+        )
         require(
             best.get("isBestSpotEntry") is True,
             f"{label}[{index}].isBestSpotEntry must be true",
@@ -302,6 +326,7 @@ def validate_bundle(
     route_context_count: int,
     recommendation_context_count: int | None = None,
     require_complete_annual_markers: bool = False,
+    multiplier_enabled: bool,
 ) -> tuple[int, dict[str, set[str]]]:
     bundle = obj(bundle_raw, label)
     entries = obj(bundle.get("entries"), f"{label}.entries")
@@ -311,7 +336,12 @@ def validate_bundle(
     family_targets: dict[str, list[tuple[str, dict[str, Any]]]] = {}
     marker_contexts: dict[str, set[str]] = {}
     for context_id, entry in entries.items():
-        validate_entry(context_id, entry, f"{label}.entries[{context_id!r}]")
+        validate_entry(
+            context_id,
+            entry,
+            f"{label}.entries[{context_id!r}]",
+            multiplier_enabled=multiplier_enabled,
+        )
         for target in entry["targets"]:
             family = str(target["family"])
             family_targets.setdefault(family, []).append((context_id, target))
@@ -349,6 +379,7 @@ def validate_bundle(
         entries,
         marker_contexts,
         f"{label}.bestSpots",
+        multiplier_enabled=multiplier_enabled,
     )
 
     all_ids: list[str] = []
@@ -411,6 +442,48 @@ def main() -> None:
         require(eligible.issubset(SEASONS), "eligibleSeasons contains an invalid season")
         require(len(eligible) == len(eligible_list), "eligibleSeasons contains duplicates")
 
+        multiplier_enabled = meta.get(
+            "temporalExclusivityScoreMultiplierEnabled"
+        )
+        require(
+            isinstance(multiplier_enabled, bool),
+            "meta.temporalExclusivityScoreMultiplierEnabled must be boolean",
+        )
+        expected_ranking_mode = (
+            "temporal_exclusivity"
+            if multiplier_enabled
+            else "legacy_no_exclusivity"
+        )
+        require(
+            meta.get("rankingMode") == expected_ranking_mode,
+            f"meta.rankingMode must be {expected_ranking_mode}",
+        )
+        adjustments = obj(
+            meta.get("scoreAdjustmentByCombinationCount"),
+            "meta.scoreAdjustmentByCombinationCount",
+        )
+        for key, count in (("1", 1), ("2", 2), ("3", 3), ("4", 4)):
+            require(
+                close(
+                    number(
+                        adjustments.get(key),
+                        f"meta.scoreAdjustmentByCombinationCount[{key!r}]",
+                    ),
+                    expected_multiplier(count, multiplier_enabled),
+                ),
+                f"score adjustment for {key} combinations is inconsistent with ranking mode",
+            )
+        require(
+            close(
+                number(
+                    adjustments.get("default"),
+                    "meta.scoreAdjustmentByCombinationCount['default']",
+                ),
+                1.0,
+            ),
+            "default score adjustment must be 1.0",
+        )
+
         route_count = int(number(meta.get("routeContextCount"), "meta.routeContextCount"))
         recommendation_count = int(
             number(meta.get("recommendationContextCount"), "meta.recommendationContextCount")
@@ -423,6 +496,7 @@ def main() -> None:
             route_context_count=route_count,
             recommendation_context_count=recommendation_count,
             require_complete_annual_markers=True,
+            multiplier_enabled=multiplier_enabled,
         )
 
         require(
@@ -477,6 +551,7 @@ def main() -> None:
                 eligible_seasons=eligible,
                 route_context_count=route_count,
                 require_complete_annual_markers=True,
+                multiplier_enabled=multiplier_enabled,
             )
             for player in players
         ]

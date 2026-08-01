@@ -18,6 +18,7 @@ from src.build_dashboard import (
     recommendation_season_scope,
     resolve_catch_families,
     resolve_dashboard_time,
+    temporal_exclusivity_multiplier_enabled,
 )
 from src.horde_core import (
     ScoringState,
@@ -1071,6 +1072,67 @@ class DashboardTests(unittest.TestCase):
                 for target in volbeat_targets
             )
         )
+
+    def test_temporal_exclusivity_multiplier_can_be_disabled_in_config(self) -> None:
+        normalized = NormalizedInput(
+            players=("Alpha",),
+            all_players=("Alpha",),
+            catches_by_player={"Alpha": ()},
+            warnings=(),
+        )
+        config = deepcopy(self.config)
+        config.setdefault("scoring", {})[
+            "use_temporal_exclusivity_multiplier"
+        ] = False
+
+        payload, sync_status, *_ = build_payload(
+            self.model,
+            normalized,
+            config,
+            datetime(2026, 8, 10, tzinfo=timezone.utc),
+        )
+
+        self.assertFalse(
+            payload["meta"]["temporalExclusivityScoreMultiplierEnabled"]
+        )
+        self.assertEqual(
+            payload["meta"]["rankingMode"],
+            "legacy_no_exclusivity",
+        )
+        self.assertEqual(
+            payload["meta"]["scoreAdjustmentByCombinationCount"],
+            {"1": 1.0, "2": 1.0, "3": 1.0, "4": 1.0, "default": 1.0},
+        )
+
+        team = payload["rankings"]["team"]
+        self.assertTrue(team["entries"])
+        for entry in team["entries"].values():
+            self.assertAlmostEqual(
+                entry["adjustedScore"],
+                entry["legacyScore"],
+                delta=1e-6,
+            )
+            self.assertEqual(entry["topTargetScoreMultiplier"], 1.0)
+            for target in entry["targets"]:
+                self.assertEqual(target["scoreMultiplier"], 1.0)
+                self.assertAlmostEqual(
+                    target["adjustedContribution"],
+                    target["legacyContribution"],
+                    delta=1e-6,
+                )
+
+        status = {str(key): value for key, value in sync_status[1:]}
+        self.assertEqual(
+            status["Temporal exclusivity score multiplier"],
+            "Disabled (legacy score only)",
+        )
+        self.assertEqual(status["Ranking mode"], "legacy_no_exclusivity")
+
+    def test_missing_scoring_config_keeps_previous_multiplier_behavior(self) -> None:
+        config = deepcopy(self.config)
+        config.pop("scoring", None)
+        self.assertTrue(temporal_exclusivity_multiplier_enabled(config))
+
 
 
 if __name__ == "__main__":
