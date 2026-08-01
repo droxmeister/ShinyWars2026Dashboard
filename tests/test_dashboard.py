@@ -228,10 +228,14 @@ class DashboardTests(unittest.TestCase):
             catches_by_player={"Alpha": ()},
             warnings=(),
         )
+        config = deepcopy(self.config)
+        config.setdefault("scoring", {})[
+            "use_temporal_exclusivity_multiplier"
+        ] = True
         payload, *_ = build_payload(
             self.model,
             normalized,
-            self.config,
+            config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
 
@@ -481,10 +485,14 @@ class DashboardTests(unittest.TestCase):
             catches_by_player={"Alpha": (), "Beta": ()},
             warnings=(),
         )
+        config = deepcopy(self.config)
+        config.setdefault("scoring", {})[
+            "use_temporal_exclusivity_multiplier"
+        ] = True
         payload, *_ = build_payload(
             self.model,
             normalized,
-            self.config,
+            config,
             datetime(2026, 8, 2, tzinfo=timezone.utc),
         )
 
@@ -530,10 +538,14 @@ class DashboardTests(unittest.TestCase):
             catches_by_player={"Alpha": ()},
             warnings=(),
         )
+        config = deepcopy(self.config)
+        config.setdefault("scoring", {})[
+            "use_temporal_exclusivity_multiplier"
+        ] = True
         payload, *_ = build_payload(
             self.model,
             normalized,
-            self.config,
+            config,
             datetime(2026, 8, 10, tzinfo=timezone.utc),
         )
 
@@ -1042,10 +1054,14 @@ class DashboardTests(unittest.TestCase):
             catches_by_player={"Alpha": ("Volbeat",)},
             warnings=(),
         )
+        config = deepcopy(self.config)
+        config.setdefault("scoring", {})[
+            "use_temporal_exclusivity_multiplier"
+        ] = True
         payload, *_ = build_payload(
             self.model,
             normalized,
-            self.config,
+            config,
             datetime(2026, 8, 10, tzinfo=timezone.utc),
         )
         team_entries = payload["rankings"]["team"]["entries"].values()
