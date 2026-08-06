@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="description" content="Live PokeMMO Shiny Wars 2026 horde strategy dashboard">
   <title>Shiny Wars 2026 — Horde Strategy</title>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=3.4.9">
 </head>
 <body>
   <header class="hero">
@@ -81,9 +81,27 @@
               <th>#</th>
               <th>Spot</th>
               <th>Window</th>
-              <th>Adjusted score</th>
+              <th scope="col">
+                <button
+                  id="sortAdjustedScore"
+                  class="table-sort-button is-active"
+                  type="button"
+                  aria-pressed="true"
+                >
+                  Adjusted Score ↓
+                </button>
+              </th>
               <th>Top target</th>
-              <th>Horde chance</th>
+              <th scope="col">
+                <button
+                  id="sortHordeChance"
+                  class="table-sort-button"
+                  type="button"
+                  aria-pressed="false"
+                >
+                  Horde Chance
+                </button>
+              </th>
               <th>Fallback</th>
               <th>Targets</th>
             </tr>
@@ -115,6 +133,6 @@
   </template>
 
   <script src="live-time.js" defer></script>
-  <script src="app.js?v=3.4.7" defer></script>
+  <script src="app.js?v=3.4.9" defer></script>
 </body>
 </html>

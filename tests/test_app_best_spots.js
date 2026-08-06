@@ -203,4 +203,15 @@ setBestSpotsOnly(false);
 assert.strictEqual(state.manualSeason, "Summer");
 assert.strictEqual(state.manualTime, "night");
 
+
+
+const indexSource = fs.readFileSync("web/index.html", "utf8");
+const stylesSource = fs.readFileSync("web/styles.css", "utf8");
+
+assert.match(indexSource, /id="sortAdjustedScore"/);
+assert.match(indexSource, /id="sortHordeChance"/);
+assert.match(indexSource, /app\.js\?v=3\.4\.9/);
+assert.match(stylesSource, /\.table-sort-button\s*\{/);
+assert.match(stylesSource, /\.table-sort-button\.is-active/);
+
 console.log("app best-spots filter tests passed");
