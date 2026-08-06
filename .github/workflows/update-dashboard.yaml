@@ -2,7 +2,9 @@ name: Update Shiny Wars dashboard
 
 on:
   workflow_dispatch:
-  
+  schedule:
+    # Every 10 minutes.
+    - cron: "*/10 * * * *"
   push:
     branches: [main]
     paths:
@@ -10,17 +12,21 @@ on:
       - "config/**"
       - "data/**"
       - "src/**"
+      - "tests/**"
       - "web/**"
       - "requirements.txt"
 
 permissions:
+  actions: read
   contents: read
   pages: write
   id-token: write
 
+# Never cancel a Pages deployment that has already started.
+# A later workflow run may wait for the current run instead of invalidating it.
 concurrency:
   group: github-pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -30,7 +36,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -38,8 +44,14 @@ jobs:
       - name: Install dependencies
         run: python -m pip install --upgrade pip && pip install -r requirements.txt
 
-      - name: Run tests
+      - name: Run Python tests
         run: python -m unittest discover -s tests -v
+
+      - name: Run frontend tests
+        run: |
+          node tests/test_live_time.js
+          node tests/test_app_best_spots.js
+          node --check web/app.js
 
       - name: Read Google Sheet and rebuild rankings
         env:
@@ -51,10 +63,10 @@ jobs:
         run: python scripts/validate_site_data.py web/data/strategy.json
 
       - name: Configure GitHub Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v4
+        uses: actions/upload-pages-artifact@v5
         with:
           path: web
 
@@ -67,4 +79,4 @@ jobs:
     steps:
       - name: Deploy GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v5
