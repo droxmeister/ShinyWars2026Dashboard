@@ -2,9 +2,6 @@ name: Update Shiny Wars dashboard
 
 on:
   workflow_dispatch:
-  schedule:
-    # Every 10 minutes.
-    - cron: "*/10 * * * *"
   push:
     branches: [main]
     paths:
@@ -26,7 +23,7 @@ permissions:
 # A later workflow run may wait for the current run instead of invalidating it.
 concurrency:
   group: github-pages
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
